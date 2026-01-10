@@ -3,61 +3,84 @@ import subprocess
 import time
 from pathlib import Path
 
-def modify_env_file(req_min_value, input_tokens=None, output_tokens=None):
-    """
-    Modify the .env file to change REQ_MIN, MIN_INPUT_TOKENS, MAX_INPUT_TOKENS, 
-    MIN_OUTPUT_TOKENS and MAX_OUTPUT_TOKENS values. input_tokens and output_tokens
-    are optional; if None they won't be added/changed.
-    """
-    env_file = Path('.env')
-
-    if not env_file.exists():
-        raise FileNotFoundError(".env file not found")
-
-    with env_file.open('r', encoding='utf-8') as f:
-        lines = f.readlines()
-
-    new_lines = []
-    req_min_found = False
-    input_found = False
-    output_found = False
-
-    for line in lines:
-        stripped = line.strip()
-        # Preserve blank lines and comments
-        if not stripped or stripped.startswith('#') or '=' not in stripped:
-            new_lines.append(line)
+#
+# Configuration loader: read values from .env without modifying the file.
+#
+def _parse_tokens_list(value):
+    """Parse TOKENS_LIST env value: "a:b,a:b,..." -> [[a,b], ...]."""
+    tokens = []
+    if not value:
+        return tokens
+    for item in value.split(','):
+        item = item.strip()
+        if not item:
             continue
+        try:
+            a_str, b_str = item.split(':', 1)
+            tokens.append([int(a_str), int(b_str)])
+        except ValueError:
+            # Skip malformed entries
+            continue
+    return tokens
 
-        key, _ = stripped.split('=', 1)
-        if key == 'REQ_MIN':
-            new_lines.append(f'REQ_MIN={req_min_value}\n')
-            req_min_found = True
-        elif input_tokens is not None and key == 'MIN_INPUT_TOKENS':
-            new_lines.append(f'MIN_INPUT_TOKENS={input_tokens}\n')
-            input_found = True
-        elif output_tokens is not None and key == 'MIN_OUTPUT_TOKENS':
-            new_lines.append(f'MIN_OUTPUT_TOKENS={output_tokens}\n')
-            output_found = True
-        elif input_tokens is not None and key == 'MAX_INPUT_TOKENS':
-            new_lines.append(f'MAX_INPUT_TOKENS={input_tokens}\n')
-            input_found = True
-        elif output_tokens is not None and key == 'MAX_OUTPUT_TOKENS':
-            new_lines.append(f'MAX_OUTPUT_TOKENS={output_tokens}\n')
-            output_found = True
-        else:
-            new_lines.append(line)
+def load_env_config():
+    """Load configuration from .env file and return a dict.
 
-    # Append any missing variables (only if corresponding arg was provided for tokens)
-    if not req_min_found:
-        new_lines.append(f'REQ_MIN={req_min_value}\n')
-    if input_tokens is not None and not input_found:
-        new_lines.append(f'INPUT_TOKENS={input_tokens}\n')
-    if output_tokens is not None and not output_found:
-        new_lines.append(f'OUTPUT_TOKENS={output_tokens}\n')
+    Expected keys:
+    - TOKENS_LIST: comma-separated pairs like "32:32,32:64"
+    - REQ_MIN_START: integer
+    - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
+    - STOP_THRESHOLD: float (used in end condition)
+    """
+    env_path = Path('.env')
+    config = {
+        'TOKENS_LIST': [],
+        'REQ_MIN_START': 1,
+        'REQ_MIN_INCREASE_MULTIPLIER': 2,
+        'STOP_THRESHOLD': 0.5,
+    }
 
-    with env_file.open('w', encoding='utf-8') as f:
-        f.writelines(new_lines)
+    if env_path.exists():
+        with env_path.open('r', encoding='utf-8') as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith('#') or '=' not in s:
+                    continue
+                key, val = s.split('=', 1)
+                key = key.strip()
+                val = val.strip()
+                if key == 'TOKENS_LIST':
+                    config['TOKENS_LIST'] = _parse_tokens_list(val)
+                elif key == 'REQ_MIN_START':
+                    try:
+                        config['REQ_MIN_START'] = int(val)
+                    except ValueError:
+                        pass
+                elif key == 'REQ_MIN_INCREASE_MULTIPLIER':
+                    try:
+                        config['REQ_MIN_INCREASE_MULTIPLIER'] = int(val)
+                    except ValueError:
+                        pass
+                elif key == 'STOP_THRESHOLD':
+                    try:
+                        config['STOP_THRESHOLD'] = float(val)
+                    except ValueError:
+                        pass
+
+    return config
+
+CONFIG = load_env_config()
+
+def set_process_env_for_run(req_min_value, input_tokens=None, output_tokens=None):
+    """Set environment variables in-process for a run without modifying .env."""
+    if req_min_value is not None:
+        os.environ['REQ_MIN'] = str(req_min_value)
+    if input_tokens is not None:
+        os.environ['MIN_INPUT_TOKENS'] = str(input_tokens)
+        os.environ['MAX_INPUT_TOKENS'] = str(input_tokens)
+    if output_tokens is not None:
+        os.environ['MIN_OUTPUT_TOKENS'] = str(output_tokens)
+        os.environ['MAX_OUTPUT_TOKENS'] = str(output_tokens)
 
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
@@ -108,7 +131,8 @@ def start_stage_1():
 
 def end_experiment(stage, M, m, M_0, m_0, evaluation):
     """Check termination condition for stage 2"""
-    if stage == 2 and (M - m) <= 0.5:
+    stop_threshold = CONFIG.get('STOP_THRESHOLD', 0.5)
+    if stage == 2 and (M - m) <= stop_threshold:
         if evaluation:
             return True, "REQ_MIN", None  # Return REQ_MIN as result
         else:
@@ -125,9 +149,10 @@ def update_stage_1(evaluation, current_req_min, retry_count_stage1):
 
     Returns: (stage, new_req_min, M_0, m_0, M, m, retry_count_stage1)
     """
+    multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2)
     if evaluation:
-        # Successful evaluation: double REQ_MIN and continue
-        new_req_min = current_req_min * 2
+        # Successful evaluation: increase REQ_MIN by configured multiplier and continue
+        new_req_min = current_req_min * multiplier
         retry_count_stage1 = 0
         return 1, new_req_min, None, None, None, None, retry_count_stage1
     else:
@@ -181,7 +206,7 @@ def run_experiment_for_tokens(tokens):
     
     # Step 1: Initialize stage 1
     stage = start_stage_1()
-    req_min = 1  # Initial value
+    req_min = CONFIG.get('REQ_MIN_START', 1)  # Initial value from .env
     
     # Stage 2 variables (initialized when transitioning to stage 2)
     M_0, m_0, M, m = None, None, None, None
@@ -193,7 +218,8 @@ def run_experiment_for_tokens(tokens):
     max_iterations = 100  # Safety limit to prevent infinite loops
     iteration = 0
 
-    modify_env_file(req_min, input_tokens=tokens[0], output_tokens=tokens[1])
+    # Set process env for the initial request generation without modifying .env
+    set_process_env_for_run(req_min, input_tokens=tokens[0], output_tokens=tokens[1])
     requests_dir = Path('requests')
     os.chdir(requests_dir)
     sample_file = Path('sample_requests.json')
@@ -206,8 +232,8 @@ def run_experiment_for_tokens(tokens):
         iteration += 1
         print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}, REQ_MIN={req_min} ---")
         
-        # Step 2: Modify .env file
-        modify_env_file(req_min)
+        # Step 2: Update in-process environment for this iteration (no .env writes)
+        set_process_env_for_run(req_min)
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
         evaluation_result = run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir)
@@ -246,17 +272,7 @@ def run_experiment_for_tokens(tokens):
     return None
 
 def main():
-    input_output_tokens = [
-        [32, 32],
-        [32, 64],
-	[32, 128],
-	[64, 32],
-	[64, 64],
-	[64, 128],
-	[128, 32],
-	[128, 64],
-	[128, 128]
-        ]
+    input_output_tokens = CONFIG.get('TOKENS_LIST', [])
     results = {}
     
     for tokens in input_output_tokens:
