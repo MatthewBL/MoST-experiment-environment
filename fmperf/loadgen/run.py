@@ -137,14 +137,14 @@ def run(result_filename=None):
     with open(infile, "rb") as f:
         sample_requests = json.load(f)
 
-    def worker(wid, channel):
+    def worker(wid, channel, worker_req_per_sec, exp_num_users):
         rs = np.random.RandomState(seed=wid)
         
         # Calculate requests per second for this worker with some randomness
-        base_req_per_sec = req_min / 60.0
+        # worker_req_per_sec is the target per worker (REQ_MIN split by num_workers)
         # Add ±20% variation to create uneven distribution
         variation = rs.uniform(0.8, 1.2)
-        worker_req_per_sec = base_req_per_sec * variation
+        worker_req_per_sec = worker_req_per_sec * variation
         
         # Calculate interval between requests for this worker
         if worker_req_per_sec > 0:
@@ -211,6 +211,7 @@ def run(result_filename=None):
                         "sample_idx": sample_idx,
                         "response_idx": 0,
                         "n_tokens": 0,
+                        "exp_num_users": exp_num_users,
                     }
                     output.append(record)
                     request_idx += 1
@@ -266,6 +267,7 @@ def run(result_filename=None):
                     "sample_idx": sample_idx,
                     "response_idx": response_idx,
                     "n_tokens": n_tokens,
+                    "exp_num_users": exp_num_users,
                 }
 
                 output.append(record)
@@ -304,11 +306,21 @@ def run(result_filename=None):
     # Using 4 workers as a reasonable default for distributing requests
     num_workers = min(4, max(1, int(req_min // 15)))  # Changed to int() for worker count
     print(f">> Using {num_workers} workers to achieve {req_min} requests per minute")
+    # Split the global REQ_MIN target across workers
+    per_worker_req_per_sec = (req_min / max(1, num_workers)) / 60.0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = []
         for i in range(num_workers):
-            futures.append(executor.submit(worker, wid=i, channel=channel))
+            futures.append(
+                executor.submit(
+                    worker,
+                    wid=i,
+                    channel=channel,
+                    worker_req_per_sec=per_worker_req_per_sec,
+                    exp_num_users=num_workers,
+                )
+            )
 
         results = []
         for future in concurrent.futures.as_completed(futures):
