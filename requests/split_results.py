@@ -1,5 +1,30 @@
+import os
 import pandas as pd
 from datetime import datetime, timedelta
+
+# Load minutes from .env (root of workspace)
+def _load_env(path):
+    env = {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+ENV_PATH = os.path.join(ROOT_DIR, '.env')
+ENV = _load_env(ENV_PATH)
+try:
+    BUFFER_MINUTES = int(ENV.get('FILTER_BUFFER_MINUTES', '5'))
+except ValueError:
+    BUFFER_MINUTES = 5
 
 def process_experiment_data(input_file):
     # Read the CSV file
@@ -20,9 +45,9 @@ def process_experiment_data(input_file):
     print(f"Experiment ended at: {end_time}")
     print(f"Total duration: {total_duration}")
     
-    # Remove first and last 5 minutes
-    filtered_start = start_time + timedelta(minutes=5)
-    filtered_end = end_time - timedelta(minutes=5)
+    # Remove first and last N minutes (from .env: FILTER_BUFFER_MINUTES)
+    filtered_start = start_time + timedelta(minutes=BUFFER_MINUTES)
+    filtered_end = end_time - timedelta(minutes=BUFFER_MINUTES)
     
     filtered_df = df[
         (df['received_timestamp'] >= filtered_start) & 
