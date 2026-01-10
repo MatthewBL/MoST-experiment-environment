@@ -4,3 +4,14 @@ scipy>=1.9.0
 statsmodels>=0.13.0
 matplotlib>=3.5.0
 pathlib2>=2.3.0; python_version < '3.4'
+PyYAML
+requests
+urllib3
+scikit-learn
+transformers
+setuptools
+kubernetes
+grpcio
+protobuf
+python-dotenv
+durations
