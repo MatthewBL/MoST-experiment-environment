@@ -109,7 +109,7 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         early_fail = False
         try:
             import importlib
-            am = importlib.import_module("analyze_metrics")
+            am = importlib.import_module("requests/analyze_metrics")
             events = am.load_folder_events(".")
             metrics = am.compute_metrics(events)
             avg_resp = float(metrics.get("avg_responded_per_minute", 0.0))
