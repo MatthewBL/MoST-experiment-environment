@@ -294,8 +294,20 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
     else:
         median_responded_requests_per_minute = 0.0
 
+    if counts:
+        average_responded_requests_per_minute = sum(counts) / len(counts)
+        min_responded_requests_per_minute = min(counts)
+        max_responded_requests_per_minute = max(counts)
+    else:
+        average_responded_requests_per_minute = 0.0
+        min_responded_requests_per_minute = 0
+        max_responded_requests_per_minute = 0
+
     return {
         "median_responded_requests_per_minute": median_responded_requests_per_minute,
+        "average_responded_requests_per_minute": average_responded_requests_per_minute,
+        "min_responded_requests_per_minute": min_responded_requests_per_minute,
+        "max_responded_requests_per_minute": max_responded_requests_per_minute,
     }
 
 
@@ -319,6 +331,9 @@ def main():
 
     print("Folder:", folder)
     print("Median responded requests per minute:", f"{metrics['median_responded_requests_per_minute']:.3f}")
+    print("Average responded requests per minute:", f"{metrics['average_responded_requests_per_minute']:.3f}")
+    print("Minimum responded requests per minute:", metrics['min_responded_requests_per_minute'])
+    print("Maximum responded requests per minute:", metrics['max_responded_requests_per_minute'])
 
 
 if __name__ == "__main__":
