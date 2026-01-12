@@ -105,19 +105,44 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         # Step 5: Convert to CSV
         run_command("python -u convert_to_csv.py")
         
+        # Early metrics check before splitting results
+        early_fail = False
+        try:
+            import importlib
+            am = importlib.import_module("analyze_metrics")
+            events = am.load_folder_events(".")
+            metrics = am.compute_metrics(events)
+            avg_resp = float(metrics.get("avg_responded_per_minute", 0.0))
+            req_min_env = os.environ.get('REQ_MIN', '0')
+            try:
+                req_min_val = float(req_min_env)
+            except ValueError:
+                req_min_val = 0.0
+            if avg_resp < (0.7 * req_min_val):
+                print(f"Early evaluation failure: avg responded/min = {avg_resp:.3f} < 70% of REQ_MIN = {req_min_val}")
+                early_fail = True
+            else:
+                print(f"Early metrics check passed: avg responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
+        except Exception as e:
+            # Don't block on metrics errors; proceed with normal flow
+            print(f"Warning: analyze_metrics check failed: {e}")
+            early_fail = False
+        
         # Step 6: Split results
         run_command("python -u split_results.py")
         
-        # Step 7: Run evaluation and capture result
-        result = run_command("python -u evaluate.py", wait=True)
+        # Step 7: Run evaluation (skip if early failure triggered)
+        if early_fail:
+            result = None
+            evaluation_success = False
+        else:
+            result = run_command("python -u evaluate.py", wait=True)
+            # Evaluation.py returns 0 for success, non-zero for failure
+            evaluation_success = (result.returncode == 0)
         
         # Step 8: Store results with environment variables as arguments, including stage and parent_dir
         store_command = f'python -u store_results.py "{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}"'
         run_command(store_command)
-        
-        # For this example, we'll assume evaluation.py returns 0 for success, non-zero for failure
-        # You may need to modify this based on how your evaluation.py actually indicates success
-        evaluation_success = (result.returncode == 0)
         
         return evaluation_success
         
