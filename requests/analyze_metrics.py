@@ -4,6 +4,7 @@ import json
 import csv
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional
+from statistics import median as stats_median
 
 # ------------------------------------------------------------
 # Metrics computed per folder:
@@ -281,47 +282,23 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
             if current_rid not in last_ts or ts > last_ts[current_rid]:
                 last_ts[current_rid] = ts
 
-    # Group by minute buckets
-    started_counts: Dict[datetime, int] = {}
-    responded_counts: Dict[datetime, int] = {}
+    # Compute per-request response times (latency) in seconds
+    response_times_sec: List[float] = []
+    for rid, start_ts in first_ts.items():
+        end_ts = last_ts.get(rid)
+        if end_ts is None:
+            continue
+        dt = (end_ts - start_ts).total_seconds()
+        if dt >= 0:
+            response_times_sec.append(float(dt))
 
-    for rid, ts in first_ts.items():
-        mb = minute_bucket(ts)
-        started_counts[mb] = started_counts.get(mb, 0) + 1
-
-    for rid, ts in last_ts.items():
-        mb = minute_bucket(ts)
-        responded_counts[mb] = responded_counts.get(mb, 0) + 1
-
-    max_started_per_minute = max(started_counts.values()) if started_counts else 0
-    max_responded_per_minute = max(responded_counts.values()) if responded_counts else 0
-
-    # Compute average counts per minute across the active window (inclusive)
-    def _average_per_minute(counts: Dict[datetime, int]) -> float:
-        if not counts:
-            return 0.0
-        keys_sorted = sorted(counts.keys())
-        total = sum(counts.values())
-        start = keys_sorted[0]
-        end = keys_sorted[-1]
-        minutes = int(((end - start).total_seconds() // 60) + 1)
-        return (total / minutes) if minutes > 0 else 0.0
-
-    avg_started_per_minute = _average_per_minute(started_counts)
-    avg_responded_per_minute = _average_per_minute(responded_counts)
-
-    # Compute tokens per request as max(response_idx) + 1
-    tokens_per_request: Dict[int, int] = {}
-    for rid, m in max_resp_idx.items():
-        if m >= 0:
-            tokens_per_request[rid] = m + 1
+    if response_times_sec:
+        median_response_time_seconds = float(stats_median(response_times_sec))
+    else:
+        median_response_time_seconds = 0.0
 
     return {
-        "tokens_per_request": tokens_per_request,
-        "max_started_per_minute": max_started_per_minute,
-        "max_responded_per_minute": max_responded_per_minute,
-        "avg_started_per_minute": avg_started_per_minute,
-        "avg_responded_per_minute": avg_responded_per_minute,
+        "median_response_time_seconds": median_response_time_seconds,
     }
 
 
@@ -344,11 +321,7 @@ def main():
     metrics = compute_metrics(events)
 
     print("Folder:", folder)
-    print("Average started per minute:", f"{metrics['avg_started_per_minute']:.3f}")
-    print("Average responded per minute:", f"{metrics['avg_responded_per_minute']:.3f}")
-    print("Tokens per request (request_id -> count):")
-    for rid in sorted(metrics["tokens_per_request"].keys()):
-        print(f"  {rid}: {metrics['tokens_per_request'][rid]}")
+    print("Median response time (s):", f"{metrics['median_response_time_seconds']:.3f}")
 
 
 if __name__ == "__main__":
