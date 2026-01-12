@@ -118,7 +118,7 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
                 req_min_val = float(req_min_env)
             except ValueError:
                 req_min_val = 0.0
-            if avg_resp < (0.8 * req_min_val):
+            if avg_resp < (0.95 * req_min_val):
                 print(f"Early evaluation failure: avg responded/min = {avg_resp:.3f} < 70% of REQ_MIN = {req_min_val}")
                 early_fail = True
             else:
