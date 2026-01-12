@@ -282,23 +282,20 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
             if current_rid not in last_ts or ts > last_ts[current_rid]:
                 last_ts[current_rid] = ts
 
-    # Compute per-request response times (latency) in seconds
-    response_times_sec: List[float] = []
-    for rid, start_ts in first_ts.items():
-        end_ts = last_ts.get(rid)
-        if end_ts is None:
-            continue
-        dt = (end_ts - start_ts).total_seconds()
-        if dt >= 0:
-            response_times_sec.append(float(dt))
+    # Compute responded requests per minute (based on last token time of each request)
+    responded_per_minute: Dict[datetime, int] = {}
+    for rid, end_ts in last_ts.items():
+        mb = minute_bucket(end_ts)
+        responded_per_minute[mb] = responded_per_minute.get(mb, 0) + 1
 
-    if response_times_sec:
-        median_response_time_seconds = float(stats_median(response_times_sec))
+    counts = list(responded_per_minute.values())
+    if counts:
+        median_responded_requests_per_minute = float(stats_median(counts))
     else:
-        median_response_time_seconds = 0.0
+        median_responded_requests_per_minute = 0.0
 
     return {
-        "median_response_time_seconds": median_response_time_seconds,
+        "median_responded_requests_per_minute": median_responded_requests_per_minute,
     }
 
 
@@ -321,7 +318,7 @@ def main():
     metrics = compute_metrics(events)
 
     print("Folder:", folder)
-    print("Median response time (s):", f"{metrics['median_response_time_seconds']:.3f}")
+    print("Median responded requests per minute:", f"{metrics['median_responded_requests_per_minute']:.3f}")
 
 
 if __name__ == "__main__":
