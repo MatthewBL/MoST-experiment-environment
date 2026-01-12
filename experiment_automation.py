@@ -92,6 +92,14 @@ def run_command(command, wait=True):
             print(f"Warning: Command '{command}' returned non-zero exit code: {process.returncode}")
     return process
 
+def run_command_capture(command):
+    """Run a shell command, wait, and capture stdout/stderr."""
+    print(f"Running (capture): {command}")
+    result = subprocess.run(command, shell=True, text=True, capture_output=True)
+    if result.returncode != 0:
+        print(f"Warning: Command '{command}' returned non-zero exit code: {result.returncode}")
+    return result.returncode, result.stdout, result.stderr
+
 def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
     """Run the evaluation pipeline steps 3-7"""
     # Step 3: Run loadgen
@@ -105,27 +113,35 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         # Step 5: Convert to CSV
         run_command("python -u convert_to_csv.py")
         
-        # Early metrics check before splitting results
+        # Early metrics check before splitting results (invoke analyze_metrics.py as a script)
         early_fail = False
         try:
-            import importlib
-            am = importlib.import_module("analyze_metrics")
-            events = am.load_folder_events(".")
-            metrics = am.compute_metrics(events)
-            avg_resp = float(metrics.get("median_responded_requests_per_minute", 0.0))
-            req_min_env = os.environ.get('REQ_MIN', '0')
-            try:
-                req_min_val = float(req_min_env)
-            except ValueError:
-                req_min_val = 0.0
-            if avg_resp < (0.95 * req_min_val):
-                print(f"Early evaluation failure: median responded/min = {avg_resp:.3f} < 95% of REQ_MIN = {req_min_val}")
-                early_fail = True
+            code, out, err = run_command_capture("python -u analyze_metrics.py .")
+            if code == 0:
+                avg_resp = 0.0
+                for line in out.splitlines():
+                    if "Median responded requests per minute:" in line:
+                        try:
+                            avg_resp = float(line.split(":", 1)[1].strip())
+                        except Exception:
+                            pass
+                        break
+                req_min_env = os.environ.get('REQ_MIN', '0')
+                try:
+                    req_min_val = float(req_min_env)
+                except ValueError:
+                    req_min_val = 0.0
+                if avg_resp < (0.95 * req_min_val):
+                    print(f"Early evaluation failure: median responded/min = {avg_resp:.3f} < 95% of REQ_MIN = {req_min_val}")
+                    early_fail = True
+                else:
+                    print(f"Early metrics check passed: median responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
             else:
-                print(f"Early metrics check passed: median responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
+                # Non-zero exit from analyze_metrics: log and continue normal flow
+                print(f"Warning: analyze_metrics.py exited with code {code}. stderr: {err.strip()}")
         except Exception as e:
             # Don't block on metrics errors; proceed with normal flow
-            print(f"Warning: analyze_metrics check failed: {e}")
+            print(f"Warning: analyze_metrics script invocation failed: {e}")
             early_fail = False
         
         # Step 6: Split results
