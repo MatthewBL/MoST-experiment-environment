@@ -54,14 +54,15 @@ def process_experiment_data(input_file):
         (df['received_timestamp'] <= filtered_end)
     ].copy().reset_index(drop=True)
     
-    print(f"\nAfter removing first and last 5 minutes:")
+    print(f"\nAfter removing first and last {BUFFER_MINUTES} minutes:")
     print(f"Filtered start: {filtered_start}")
     print(f"Filtered end: {filtered_end}")
     print(f"Filtered duration: {filtered_end - filtered_start}")
     print(f"Records in filtered data: {len(filtered_df)}")
     
-    # Split into two 10-minute periods
-    split_time = filtered_start + timedelta(minutes=10)
+    # Split filtered window into two equal halves
+    filtered_duration = filtered_end - filtered_start
+    split_time = filtered_start + (filtered_duration / 2)
     
     first_half = filtered_df[
         filtered_df['received_timestamp'] < split_time
@@ -71,9 +72,9 @@ def process_experiment_data(input_file):
         filtered_df['received_timestamp'] >= split_time
     ].copy().reset_index(drop=True)
     
-    print(f"\nSplit time: {split_time}")
-    print(f"First 10-minute period: {len(first_half)} records")
-    print(f"Second 10-minute period: {len(second_half)} records")
+    print(f"\nSplit midpoint: {split_time}")
+    print(f"First half: {len(first_half)} records")
+    print(f"Second half: {len(second_half)} records")
     
     # Save to new CSV files
     first_half.to_csv('first_half.csv', index=False)

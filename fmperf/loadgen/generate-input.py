@@ -1,4 +1,5 @@
 import argparse
+import time
 import numpy as np
 import sys
 import json
@@ -41,12 +42,32 @@ parser.add_argument(
 args = parser.parse_args()
 
 
-def get_streaming_response(response: requests.Response):
+def get_streaming_response(response: requests.Response, request_timeout: float, ttft_timeout: float, tpot_timeout: float):
+    response_iter = response.iter_lines(
+        chunk_size=8192,
+        decode_unicode=False,
+        delimiter=b"\n",
+    )
+
     finished = False
     prev_completion_tokens = 0
-    for chunk in response.iter_lines(
-        chunk_size=8192, decode_unicode=False, delimiter=b"\n"
-    ):
+    request_start_time = time.time_ns()
+    first_token_received = False
+    last_token_time = request_start_time
+
+    while not finished:
+        # request-level timeout
+        current_time = time.time_ns()
+        if (current_time - request_start_time) / 1e9 > request_timeout:
+            raise TimeoutError(f"Request timeout: {request_timeout}s exceeded")
+
+        chunk = next(response_iter)
+        timestamp = time.time_ns()
+
+        # time per output token (after first)
+        if first_token_received and (timestamp - last_token_time) / 1e9 > tpot_timeout:
+            raise TimeoutError(f"TPOT timeout: {tpot_timeout}s exceeded")
+
         if chunk and not finished:
             data = chunk.decode("utf-8").strip().split("data: ")[1]
             data_parsed = json.loads(data)
@@ -57,6 +78,16 @@ def get_streaming_response(response: requests.Response):
                 usage = data_parsed["usage"]
                 token_count = usage["completion_tokens"] - prev_completion_tokens
                 prev_completion_tokens = usage["completion_tokens"]
+
+                # first-token timeout (TTFT)
+                if not first_token_received:
+                    ttft = (timestamp - request_start_time) / 1e9
+                    if ttft > ttft_timeout:
+                        raise TimeoutError(
+                            f"TTFT timeout: {ttft_timeout}s exceeded (TTFT: {ttft:.3f}s)"
+                        )
+                    first_token_received = True
+
                 for i in range(token_count):
                     yield {
                         "index": out["index"],
@@ -69,6 +100,8 @@ def get_streaming_response(response: requests.Response):
                             None if (i < token_count - 1) else out["stop_reason"]
                         ),
                     }
+
+                last_token_time = timestamp
             else:
                 raise RuntimeError("No usage data in server response")
 
@@ -132,18 +165,24 @@ def generate_vllm_request(config, url):
 
     headers = {"User-Agent": "Test Client"}
 
+    # Timeouts configuration (can be overridden via env)
+    request_timeout = float(os.environ.get("REQUEST_TIMEOUT", "300"))
+    ttft_timeout = float(os.environ.get("TTFT_TIMEOUT", "60"))
+    tpot_timeout = float(os.environ.get("TPOT_TIMEOUT", "30"))
+
     response = requests.post(
         "http://%s/v1/completions" % (url_no_prefix),
         headers=headers,
         json=request,
         stream=True,
+        timeout=request_timeout,
     )
 
     if response.status_code != 200:
         raise RuntimeError(response.text)
 
     expected = []
-    for r in get_streaming_response(response):
+    for r in get_streaming_response(response, request_timeout, ttft_timeout, tpot_timeout):
         expected.append(r)
 
     # let's check if we get one output per token (not the case for TGIS)
@@ -192,11 +231,40 @@ def generate_tgis_request(config, url):
 
     message = json_format.ParseDict(request, pb2.SingleGenerationRequest())
 
+    # Timeouts configuration (can be overridden via env)
+    request_timeout = float(os.environ.get("REQUEST_TIMEOUT", "300"))
+    ttft_timeout = float(os.environ.get("TTFT_TIMEOUT", "60"))
+    tpot_timeout = float(os.environ.get("TPOT_TIMEOUT", "30"))
+
     response = []
+    request_start_time = time.time_ns()
+    first_token_received = False
+    last_token_time = request_start_time
+
     for x in stub.GenerateStream(message):
+        # request-level timeout
+        current_time = time.time_ns()
+        if (current_time - request_start_time) / 1e9 > request_timeout:
+            raise TimeoutError(f"Request timeout: {request_timeout}s exceeded")
+
         tmp = json_format.MessageToDict(x)
         if "inputTokenCount" not in tmp:
+            timestamp = time.time_ns()
+            # TPOT timeout after first token
+            if first_token_received and (timestamp - last_token_time) / 1e9 > tpot_timeout:
+                raise TimeoutError(f"TPOT timeout: {tpot_timeout}s exceeded")
+
+            # TTFT for first token
+            if not first_token_received:
+                ttft = (timestamp - request_start_time) / 1e9
+                if ttft > ttft_timeout:
+                    raise TimeoutError(
+                        f"TTFT timeout: {ttft_timeout}s exceeded (TTFT: {ttft:.3f}s)"
+                    )
+                first_token_received = True
+
             response.append(tmp)
+            last_token_time = timestamp
 
     return request, response
 
@@ -271,6 +339,9 @@ if args.from_model:
     samples = requests_model.sample(sample_size)
     print(samples)
 
+attempts_per_sample = int(os.environ.get("MAX_GENERATE_ATTEMPTS", "3"))
+retry_backoff = float(os.environ.get("RETRY_BACKOFF_SECONDS", "1.0"))
+
 for sample_idx in range(sample_size):
     if args.from_model:
         sample = samples.iloc[sample_idx]
@@ -295,18 +366,32 @@ for sample_idx in range(sample_size):
         "config": config,
     }
 
-    try:
-        if target == "tgis":
-            case["request"], case["expected"] = generate_tgis_request(config, url)
-        elif target == "vllm":  # StackSpec will also use this
-            case["request"], case["expected"] = generate_vllm_request(config, url)
-        else:
-            raise ValueError(f"Invalid target: {target}")
+    success = False
+    for attempt in range(1, attempts_per_sample + 1):
+        try:
+            if target == "tgis":
+                case["request"], case["expected"] = generate_tgis_request(config, url)
+            elif target == "vllm":  # StackSpec will also use this
+                case["request"], case["expected"] = generate_vllm_request(config, url)
+            else:
+                raise ValueError(f"Invalid target: {target}")
 
-        print(json.dumps(case, indent=4))
-        cases.append(case)
-    except Exception as e:
-        print(traceback.format_exc())
+            # verify expected token count to avoid downstream mismatches
+            if len(case["expected"]) != config["out_tokens"]:
+                raise RuntimeError(
+                    f"Expected {config['out_tokens']} tokens, got {len(case['expected'])}"
+                )
+
+            print(json.dumps(case, indent=4))
+            cases.append(case)
+            success = True
+            break
+        except Exception:
+            print(f"[sample {sample_idx}] attempt {attempt} failed:\n{traceback.format_exc()}")
+            time.sleep(retry_backoff)
+
+    if not success:
+        print(f"[sample {sample_idx}] giving up after {attempts_per_sample} attempts; skipping sample")
 
 
 if len(cases) > 0:
