@@ -109,20 +109,20 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         early_fail = False
         try:
             import importlib
-            am = importlib.import_module("requests/analyze_metrics")
+            am = importlib.import_module("analyze_metrics")
             events = am.load_folder_events(".")
             metrics = am.compute_metrics(events)
-            avg_resp = float(metrics.get("avg_responded_per_minute", 0.0))
+            avg_resp = float(metrics.get("median_responded_requests_per_minute", 0.0))
             req_min_env = os.environ.get('REQ_MIN', '0')
             try:
                 req_min_val = float(req_min_env)
             except ValueError:
                 req_min_val = 0.0
             if avg_resp < (0.95 * req_min_val):
-                print(f"Early evaluation failure: avg responded/min = {avg_resp:.3f} < 70% of REQ_MIN = {req_min_val}")
+                print(f"Early evaluation failure: median responded/min = {avg_resp:.3f} < 95% of REQ_MIN = {req_min_val}")
                 early_fail = True
             else:
-                print(f"Early metrics check passed: avg responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
+                print(f"Early metrics check passed: median responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
         except Exception as e:
             # Don't block on metrics errors; proceed with normal flow
             print(f"Warning: analyze_metrics check failed: {e}")
