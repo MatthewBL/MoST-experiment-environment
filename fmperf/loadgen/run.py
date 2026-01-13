@@ -170,7 +170,14 @@ def run(result_filename=None):
         # progress logging: print remaining every LOG_INTERVAL seconds
         LOG_INTERVAL = 5.0
         last_log_time = t_start
-        last_request_time = t_start
+        
+        # Driftless scheduler: schedule first request immediately and then at fixed intervals with jitter
+        # This avoids skipping the first interval window which caused under-sending at higher RPMs.
+        next_request_time = t_start  # first request goes out immediately
+        if worker_req_per_sec > 0:
+            interval_base_ns = (1.0 / worker_req_per_sec) * 1e9
+        else:
+            interval_base_ns = float('inf')
 
         def process_request(req_idx):
             # Pick a sample request (thread-safe selection)
@@ -271,15 +278,12 @@ def run(result_filename=None):
 
             return True
 
-        # Scheduler loop: submit new requests at the target rate irrespective of prior completions
-        while time.time_ns() - t_start < duration.to_seconds() * 1e9:
-            if worker_req_per_sec > 0:
-                jitter = rs.uniform(1 - jitter_range, 1 + jitter_range)
-                next_interval_ns = base_interval * jitter * 1e9
-                next_request_time = last_request_time + next_interval_ns
-                current_time = time.time_ns()
-                if current_time < next_request_time:
-                    time.sleep((next_request_time - current_time) / 1e9)
+        # Scheduler loop: use next_request_time to avoid drift and ensure the first request is immediate
+        # Only schedule when we have a positive target rate
+        while worker_req_per_sec > 0 and (next_request_time - t_start) < duration.to_seconds() * 1e9:
+            current_time = time.time_ns()
+            if current_time < next_request_time:
+                time.sleep((next_request_time - current_time) / 1e9)
 
             # Prune finished threads
             finished = [t for t in inflight if not t.is_alive()]
@@ -292,7 +296,10 @@ def run(result_filename=None):
             th.start()
             inflight.add(th)
             requests_scheduled += 1
-            last_request_time = time.time_ns()
+            
+            # Compute next schedule time with jitter around the base interval
+            jitter = rs.uniform(1 - jitter_range, 1 + jitter_range)
+            next_request_time += int(interval_base_ns * jitter)
 
             # progress logging: print remaining time every LOG_INTERVAL seconds
             now_ns = time.time_ns()
