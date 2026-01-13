@@ -105,13 +105,14 @@ def minute_bucket(dt: datetime) -> datetime:
 
 def extract_events_from_json_item(item) -> List[Dict[str, Optional[datetime]]]:
     """Extract token events from a JSON item.
-    Returns a list of dicts with keys: 'request_idx', 'response_idx', 'timestamp'.
+    Returns a list of dicts with keys: 'worker_idx', 'request_idx', 'response_idx', 'timestamp'.
     Attempts multiple shapes: flat token event with timestamp, or nested token lists.
     """
     events: List[Dict[str, Optional[datetime]]] = []
 
     response_idx = item.get("response_idx")
     request_idx = item.get("request_idx")
+    worker_idx = item.get("worker_idx")
 
     # Case 1: flat event contains a timestamp directly
     for key in TimestampKeys:
@@ -119,6 +120,7 @@ def extract_events_from_json_item(item) -> List[Dict[str, Optional[datetime]]]:
             ts = parse_timestamp(item.get(key))
             if ts is not None and response_idx is not None:
                 events.append({
+                    "worker_idx": int(worker_idx) if worker_idx is not None else None,
                     "request_idx": request_idx if request_idx is not None else None,
                     "response_idx": int(response_idx),
                     "timestamp": ts,
@@ -138,6 +140,7 @@ def extract_events_from_json_item(item) -> List[Dict[str, Optional[datetime]]]:
                                 break
                 if ts is not None and response_idx is not None:
                     events.append({
+                        "worker_idx": int(worker_idx) if worker_idx is not None else None,
                         "request_idx": request_idx if request_idx is not None else None,
                         "response_idx": int(response_idx),
                         "timestamp": ts,
@@ -241,26 +244,30 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
 
     # Determine request IDs
     use_request_idx = any(e.get("request_idx") is not None for e in events_sorted)
+    use_worker_idx = any(e.get("worker_idx") is not None for e in events_sorted)
     request_id_of_event: List[int] = []
     # Track max response_idx per request for accurate token counts
-    max_resp_idx: Dict[int, int] = {}
-    first_ts: Dict[int, datetime] = {}
-    last_ts: Dict[int, datetime] = {}
+    # Use a composite key (worker_idx, request_idx) when worker_idx is present
+    max_resp_idx = {}
+    first_ts = {}
+    last_ts = {}
 
     if use_request_idx:
         for e in events_sorted:
             rid = int(e["request_idx"])  # type: ignore
+            wid = int(e["worker_idx"]) if use_worker_idx and e.get("worker_idx") is not None else None
+            key = (wid, rid)
             ts = e["timestamp"]  # type: ignore
             request_id_of_event.append(rid)
             # Update max response_idx if available
             rsi = e.get("response_idx")
             if rsi is not None:
                 rsi_int = int(rsi)
-                max_resp_idx[rid] = max(rsi_int, max_resp_idx.get(rid, -1))
-            if rid not in first_ts or ts < first_ts[rid]:
-                first_ts[rid] = ts
-            if rid not in last_ts or ts > last_ts[rid]:
-                last_ts[rid] = ts
+                max_resp_idx[key] = max(rsi_int, max_resp_idx.get(key, -1))
+            if key not in first_ts or ts < first_ts[key]:
+                first_ts[key] = ts
+            if key not in last_ts or ts > last_ts[key]:
+                last_ts[key] = ts
     else:
         # Derive sequential request IDs from response_idx resets
         current_rid = -1
@@ -272,15 +279,17 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
             if current_rid < 0:
                 # If stream doesn't start at 0, start now
                 current_rid = 0
+            wid = int(e.get("worker_idx")) if e.get("worker_idx") is not None else None
+            key = (wid, current_rid)
             request_id_of_event.append(current_rid)
             rsi = e.get("response_idx")
             if rsi is not None:
                 rsi_int = int(rsi)
-                max_resp_idx[current_rid] = max(rsi_int, max_resp_idx.get(current_rid, -1))
-            if current_rid not in first_ts or ts < first_ts[current_rid]:
-                first_ts[current_rid] = ts
-            if current_rid not in last_ts or ts > last_ts[current_rid]:
-                last_ts[current_rid] = ts
+                max_resp_idx[key] = max(rsi_int, max_resp_idx.get(key, -1))
+            if key not in first_ts or ts < first_ts[key]:
+                first_ts[key] = ts
+            if key not in last_ts or ts > last_ts[key]:
+                last_ts[key] = ts
 
     # Compute responded requests per minute (based on last token time of each request)
     responded_per_minute: Dict[datetime, int] = {}
