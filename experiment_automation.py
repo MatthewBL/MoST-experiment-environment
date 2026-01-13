@@ -356,9 +356,11 @@ def run_experiment_for_tokens(tokens):
             if not isinstance(rows, list):
                 return None
             totals = {}
+            worker_idxs = set()
             for r in rows:
                 rid = r.get("request_idx")
                 n = r.get("n_tokens", 0)
+                wid = r.get("worker_idx")
                 if rid is None:
                     continue
                 try:
@@ -366,7 +368,10 @@ def run_experiment_for_tokens(tokens):
                 except Exception:
                     n_val = 0.0
                 totals[rid] = totals.get(rid, 0.0) + n_val
-            values = list(totals.values())
+                if wid is not None:
+                    worker_idxs.add(wid)
+            worker_count = len(worker_idxs) if len(worker_idxs) > 0 else 1
+            values = [v / worker_count for v in totals.values()]
             if not values:
                 return 0.0
             values.sort()

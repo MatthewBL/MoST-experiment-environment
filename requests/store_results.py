@@ -134,9 +134,10 @@ def main():
         shutil.move("output.csv", os.path.join(full_dir_path, "output.csv"))
         shutil.move("first_half.csv", os.path.join(full_dir_path, "first_half.csv"))
         shutil.move("second_half.csv", os.path.join(full_dir_path, "second_half.csv"))
-        shutil.move("results.json", os.path.join(full_dir_path, "results.json"))
+        # Keep a copy of results.json in the working directory for downstream readers
+        shutil.copyfile("results.json", os.path.join(full_dir_path, "results.json"))
         
-        print("Moved all CSV files to the directory")
+        print("Moved CSV files and copied results.json to the directory")
         
     except Exception as e:
         print(f"An error occurred: {e}")
