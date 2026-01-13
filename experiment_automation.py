@@ -196,68 +196,62 @@ def update_stage_1(evaluation, current_req_min, retry_count_stage1, highest_true
     """Update logic for stage 1 with a retry mechanism.
 
     Behavior:
-    - If TRUE and no FALSE yet: track highest TRUE, increase REQ_MIN by multiplier
-    - If FALSE and no TRUE yet: track lowest FALSE, decrease REQ_MIN by multiplier
-    - If both TRUE and FALSE found: transition to stage 2 with those bounds
-    - Retry mechanism: on first consecutive failure/success of same type, retry same value
+    - Success (TRUE): track highest TRUE; if no confirmed FALSE yet, increase REQ_MIN by multiplier; if a confirmed FALSE exists, transition to stage 2.
+    - Failure (FALSE): require a double-false at the SAME REQ_MIN to confirm the FALSE bound. A single FALSE followed by TRUE must NOT start stage 2.
+    - If no TRUE yet and a value is confirmed FALSE (double-false), keep decreasing to find a TRUE bound.
+
+    Stage 2 only starts when there is at least one TRUE (lower bound) and a CONFIRMED FALSE (upper bound via double-false).
 
     Returns: (stage, new_req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false)
     """
     multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2)
-    
+
     if evaluation:
-        # Successful evaluation
+        # Successful evaluation: record lower bound and clear any pending failure retry
         if highest_true is None or current_req_min > highest_true:
             highest_true = current_req_min
-        
+
+        # Clear failure retry on success
+        retry_count_stage1 = 0
+
         if lowest_false is None:
-            # No FALSE found yet, keep increasing
-            if retry_count_stage1 == 0:
-                # First success at this level, continue increasing
-                new_req_min = current_req_min * multiplier
-                retry_count_stage1 = 0
-                return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
-            else:
-                # Retry succeeded, now increase
-                new_req_min = current_req_min * multiplier
-                retry_count_stage1 = 0
-                return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
+            # No confirmed FALSE yet → keep increasing
+            new_req_min = current_req_min * multiplier
+            return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
         else:
-            # We have both TRUE and FALSE bounds, transition to stage 2
+            # We have a confirmed FALSE and at least one TRUE → transition to stage 2
             M_0 = lowest_false
             m_0 = highest_true
             stage = 2
             M = M_0
             m = m_0
             new_req_min = (M + m) / 2
-            retry_count_stage1 = 0
             return stage, new_req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false
     else:
-        # Failed evaluation
-        if lowest_false is None or current_req_min < lowest_false:
-            lowest_false = current_req_min
-        
-        if highest_true is None:
-            # No TRUE found yet, keep decreasing
-            if retry_count_stage1 == 0:
-                # First failure, retry same value
-                retry_count_stage1 = 1
-                return 1, current_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
-            else:
-                # Second consecutive failure, decrease
-                new_req_min = current_req_min / multiplier
-                retry_count_stage1 = 0
-                return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
+        # Failed evaluation: require double-false to confirm upper bound
+        if retry_count_stage1 == 0:
+            # First failure at this REQ_MIN → retry same value to confirm
+            retry_count_stage1 = 1
+            return 1, current_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
         else:
-            # We have both TRUE and FALSE bounds, transition to stage 2
-            M_0 = lowest_false
-            m_0 = highest_true
-            stage = 2
-            M = M_0
-            m = m_0
-            new_req_min = (M + m) / 2
+            # Second consecutive failure at same REQ_MIN → confirmed FALSE
             retry_count_stage1 = 0
-            return stage, new_req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false
+            if lowest_false is None or current_req_min < lowest_false:
+                lowest_false = current_req_min
+
+            if highest_true is None:
+                # No TRUE yet: keep decreasing to find a TRUE bound
+                new_req_min = current_req_min / multiplier
+                return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
+            else:
+                # Have TRUE and confirmed FALSE → transition to stage 2
+                M_0 = lowest_false
+                m_0 = highest_true
+                stage = 2
+                M = M_0
+                m = m_0
+                new_req_min = (M + m) / 2
+                return stage, new_req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false
 
 def update_stage_2(evaluation, current_req_min, M, m, retry_count_stage2):
     """Update logic for stage 2 with retry mechanism (uses retry_count_stage2)."""
