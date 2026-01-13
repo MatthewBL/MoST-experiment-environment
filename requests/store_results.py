@@ -78,20 +78,32 @@ def main():
         else:
             stage = os.environ.get('STAGE', '')
         
-        # Get values from .env file
+        # Resolve tokens and REQ_MIN: prefer CLI args, then env, then .env
         min_input_tokens = ''
         min_output_tokens = ''
         req_min = ''
-        
-        if os.path.exists('../.env'):
+
+        # CLI args provided from experiment_automation.py
+        if len(sys.argv) >= 10:
+            min_input_tokens = sys.argv[7]
+            min_output_tokens = sys.argv[8]
+            req_min = sys.argv[9]
+        else:
+            # Environment variables set in-process by experiment_automation.py
+            min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
+            min_output_tokens = os.environ.get('MAX_OUTPUT_TOKENS', '') or os.environ.get('MIN_OUTPUT_TOKENS', '')
+            req_min = os.environ.get('REQ_MIN', '')
+
+        # Fallback to .env only if still missing
+        if (min_input_tokens == '' or min_output_tokens == '' or req_min == '') and os.path.exists('../.env'):
             with open('../.env', 'r') as env_file:
                 for line in env_file:
                     line = line.strip()
-                    if line.startswith('MIN_INPUT_TOKENS='):
+                    if min_input_tokens == '' and line.startswith('MIN_INPUT_TOKENS='):
                         min_input_tokens = line.split('=', 1)[1]
-                    elif line.startswith('MIN_OUTPUT_TOKENS='):
+                    elif min_output_tokens == '' and line.startswith('MIN_OUTPUT_TOKENS='):
                         min_output_tokens = line.split('=', 1)[1]
-                    elif line.startswith('REQ_MIN='):
+                    elif req_min == '' and line.startswith('REQ_MIN='):
                         req_min = line.split('=', 1)[1]
         
         # Get evaluation from output.csv

@@ -161,8 +161,15 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
             # Evaluation.py returns 0 for success, non-zero for failure
             evaluation_success = (result.returncode == 0)
         
-        # Step 8: Store results with environment variables as arguments, including stage and parent_dir
-        store_command = f'python -u store_results.py "{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}"'
+        # Step 8: Store results with explicit tokens and REQ_MIN to avoid relying on .env
+        min_in = os.environ.get('MIN_INPUT_TOKENS', '')
+        min_out = os.environ.get('MIN_OUTPUT_TOKENS', '')
+        req_min = os.environ.get('REQ_MIN', '')
+        store_command = (
+            f'python -u store_results.py '
+            f'"{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}" '
+            f'"{min_in}" "{min_out}" "{req_min}"'
+        )
         run_command(store_command)
         
         return evaluation_success
