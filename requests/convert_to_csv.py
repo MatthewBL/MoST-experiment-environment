@@ -26,19 +26,25 @@ def calculate_completion_time_and_success(json_file_path="results.json", output_
     else:
         results_data = json_data
 
-    # Group by request_idx
+    # Group by (worker_idx, request_idx) to avoid collisions across workers
     request_groups = defaultdict(list)
 
     for item in results_data:
-        request_idx = item["request_idx"]
-        request_groups[request_idx].append(item)
+        # Backward compatibility: some records may lack worker_idx
+        worker_idx = item.get("worker_idx")
+        request_idx = item.get("request_idx")
+        if request_idx is None:
+            # Skip malformed records without request index
+            continue
+        key = (worker_idx if worker_idx is not None else -1, int(request_idx))
+        request_groups[key].append(item)
 
     # Calculate completion time and success for each request group
     completion_data = {}
     total_requests = len(request_groups)
     successful_requests = 0
 
-    for request_idx, group in request_groups.items():
+    for (worker_idx, request_idx), group in request_groups.items():
         # Sort the group by timestamp to ensure chronological order
         group.sort(key=lambda x: x["timestamp"])
 
@@ -58,10 +64,16 @@ def calculate_completion_time_and_success(json_file_path="results.json", output_
         end_dt = datetime.utcfromtimestamp(end / 1_000_000_000)
         received_timestamp_str = end_dt.strftime('%Y%m%dT%H%M%S')
 
-        completion_data[request_idx] = {
+        # Composite identifier for clarity
+        global_request_id = f"{worker_idx}:{request_idx}"
+
+        completion_data[global_request_id] = {
             "complete_response_time": completion_time_ms,
             "received_timestamp": received_timestamp_str,
-            "success": is_successful
+            "success": is_successful,
+            "worker_idx": worker_idx,
+            "request_idx": request_idx,
+            "global_request_id": global_request_id,
         }
 
     # Calculate overall success rate (as percentage)
@@ -72,7 +84,7 @@ def calculate_completion_time_and_success(json_file_path="results.json", output_
 
     # Generate CSV file
     with open(output_csv_path, 'w', newline='') as csvfile:
-        fieldnames = ['received_timestamp', 'complete_response_time', 'success_rate', 'success']
+        fieldnames = ['received_timestamp', 'complete_response_time', 'success_rate', 'success', 'worker_idx', 'request_idx', 'global_request_id']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         writer.writeheader()
@@ -81,7 +93,10 @@ def calculate_completion_time_and_success(json_file_path="results.json", output_
                 'received_timestamp': data['received_timestamp'],
                 'complete_response_time': data['complete_response_time'],
                 'success_rate': success_rate,  # Same for all rows
-                'success': data['success']  # Individual request success status
+                'success': data['success'],  # Individual request success status
+                'worker_idx': data.get('worker_idx'),
+                'request_idx': data.get('request_idx'),
+                'global_request_id': data.get('global_request_id'),
             })
 
     print(f"CSV file generated successfully at: {output_csv_path}")
