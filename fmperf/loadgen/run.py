@@ -13,6 +13,9 @@ from fmperf.utils import parse_results
 from datetime import datetime
 from .collect_energy import collect_metrics, summarize_energy
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
+import threading
+import itertools
+import math
 
 
 def run(result_filename=None):
@@ -139,51 +142,43 @@ def run(result_filename=None):
 
     def worker(wid, channel, worker_req_per_sec, exp_num_users):
         rs = np.random.RandomState(seed=wid)
+        rs_lock = threading.Lock()
         
         # Calculate requests per second for this worker with some randomness
         # worker_req_per_sec is the target per worker (REQ_MIN split by num_workers)
-        # Add ±20% variation to create uneven distribution
         variation = rs.uniform(0.8, 1.2)
         worker_req_per_sec = worker_req_per_sec * variation
         
         # Calculate interval between requests for this worker
         if worker_req_per_sec > 0:
             base_interval = 1.0 / worker_req_per_sec
-            # Add some jitter (±30%) to make distribution more uneven
-            jitter_range = 0.3
+            jitter_range = 0.3  # ±30% jitter
         else:
             base_interval = float('inf')
-            jitter_range = 0
+            jitter_range = 0.0
 
         t_start = time.time_ns()
 
         output = []
-        request_idx = 0
+        output_lock = threading.Lock()
+        request_counter = itertools.count()
+        requests_scheduled = 0
+
+        # Track in-flight requests for cleanup; agnostic to expected duration
+        inflight = set()  # set[threading.Thread]
 
         # progress logging: print remaining every LOG_INTERVAL seconds
         LOG_INTERVAL = 5.0
         last_log_time = t_start
         last_request_time = t_start
 
-        while (
-            time.time_ns() - t_start < duration.to_seconds() * 1000.0 * 1000.0 * 1000.0
-        ):
-            # Calculate next request time with jitter
-            if worker_req_per_sec > 0:
-                jitter = rs.uniform(1 - jitter_range, 1 + jitter_range)
-                next_interval_ns = base_interval * jitter * 1e9
-                next_request_time = last_request_time + next_interval_ns
-                
-                # Sleep until next request time
-                current_time = time.time_ns()
-                if current_time < next_request_time:
-                    sleep_time = (next_request_time - current_time) / 1e9
-                    time.sleep(sleep_time)
-
-            sample_idx = rs.randint(low=0, high=len(sample_requests))
+        def process_request(req_idx):
+            # Pick a sample request (thread-safe selection)
+            with rs_lock:
+                sample_idx = rs.randint(low=0, high=len(sample_requests))
             sample_request = sample_requests[sample_idx]["request"]
 
-            if target == "vllm":  # StackSpec will also use this
+            if target == "vllm":
                 headers = {"User-Agent": "fmaas-load-test"}
                 t0 = time.time_ns()
                 try:
@@ -192,7 +187,7 @@ def run(result_filename=None):
                         headers=headers,
                         json=sample_request,
                         stream=True,
-                        timeout=request_timeout  # Add request timeout
+                        timeout=request_timeout
                     )
                 except requests.exceptions.Timeout:
                     timestamp = time.time_ns()
@@ -207,23 +202,19 @@ def run(result_filename=None):
                         "exclude": (timestamp - t_start) / 1000.0 / 1000.0 / 1000.0
                         > (duration.to_seconds() + grace_period.to_seconds()),
                         "worker_idx": wid,
-                        "request_idx": request_idx,
+                        "request_idx": req_idx,
                         "sample_idx": sample_idx,
                         "response_idx": 0,
                         "n_tokens": 0,
                         "exp_num_users": exp_num_users,
                     }
-                    output.append(record)
-                    request_idx += 1
-                    last_request_time = timestamp
+                    with output_lock:
+                        output.append(record)
                     time.sleep(backoff.to_seconds())
-                    continue
+                    return True
             elif target == "tgis":
                 from text_generation_tests.pb import generation_pb2 as pb2
-
-                message = json_format.ParseDict(
-                    sample_request, pb2.SingleGenerationRequest()
-                )
+                message = json_format.ParseDict(sample_request, pb2.SingleGenerationRequest())
                 t0 = time.time_ns()
                 response = stub.GenerateStream(message)
             else:
@@ -232,7 +223,7 @@ def run(result_filename=None):
             stop = False
             response_idx = 0
 
-            if target == "vllm":  # StackSpec will also use this
+            if target == "vllm":
                 response_generator = get_streaming_response_vllm(response, request_timeout, ttft_timeout, tpot_timeout)
             elif target == "tgis":
                 response_generator = get_streaming_response_tgis(response, request_timeout, ttft_timeout, tpot_timeout)
@@ -263,21 +254,44 @@ def run(result_filename=None):
                     "exclude": (t - t_start) / 1000.0 / 1000.0 / 1000.0
                     > (duration.to_seconds() + grace_period.to_seconds()),
                     "worker_idx": wid,
-                    "request_idx": request_idx,
+                    "request_idx": req_idx,
                     "sample_idx": sample_idx,
                     "response_idx": response_idx,
                     "n_tokens": n_tokens,
                     "exp_num_users": exp_num_users,
                 }
 
-                output.append(record)
+                with output_lock:
+                    output.append(record)
                 response_idx += 1
                 t0 = t
 
             if apply_backoff:
                 time.sleep(backoff.to_seconds())
 
-            request_idx += 1
+            return True
+
+        # Scheduler loop: submit new requests at the target rate irrespective of prior completions
+        while time.time_ns() - t_start < duration.to_seconds() * 1e9:
+            if worker_req_per_sec > 0:
+                jitter = rs.uniform(1 - jitter_range, 1 + jitter_range)
+                next_interval_ns = base_interval * jitter * 1e9
+                next_request_time = last_request_time + next_interval_ns
+                current_time = time.time_ns()
+                if current_time < next_request_time:
+                    time.sleep((next_request_time - current_time) / 1e9)
+
+            # Prune finished threads
+            finished = [t for t in inflight if not t.is_alive()]
+            for t in finished:
+                inflight.discard(t)
+
+            # Schedule a new request by starting a dedicated thread
+            req_idx = next(request_counter)
+            th = threading.Thread(target=process_request, args=(req_idx,), daemon=True)
+            th.start()
+            inflight.add(th)
+            requests_scheduled += 1
             last_request_time = time.time_ns()
 
             # progress logging: print remaining time every LOG_INTERVAL seconds
@@ -287,8 +301,12 @@ def run(result_filename=None):
             if remaining_s < 0:
                 remaining_s = 0.0
             if (now_ns - last_log_time) / 1e9 >= LOG_INTERVAL:
-                print(f"[worker {wid}] remaining: {remaining_s:.1f}s (elapsed: {elapsed_s:.1f}s, reqs: {request_idx})")
+                print(f"[worker {wid}] remaining: {remaining_s:.1f}s (elapsed: {elapsed_s:.1f}s, reqs scheduled: {requests_scheduled}, inflight: {len(inflight)})")
                 last_log_time = now_ns
+
+        # Wait for all in-flight request threads to finish
+        for th in list(inflight):
+            th.join()
 
         with open("results_wid%d" % (wid), "w") as f:
             json.dump(output, f)
@@ -302,10 +320,11 @@ def run(result_filename=None):
 
     channel = grpc.insecure_channel(api_url) if target == "tgis" else None
 
-    # Use a fixed number of workers (you can adjust this based on your needs)
-    # Using 4 workers as a reasonable default for distributing requests
-    num_workers = min(4, max(1, int(req_min // 15)))  # Changed to int() for worker count
-    print(f">> Using {num_workers} workers to achieve {req_min} requests per minute")
+    # Determine number of workers dynamically based on target RPM and per-worker capacity
+    per_worker_rpm_capacity = int(os.environ.get("WORKER_RPM_CAPACITY", "15"))
+    max_workers = int(os.environ.get("MAX_WORKERS", "64"))
+    num_workers = max(1, min(max_workers, int(math.ceil(req_min / max(1, per_worker_rpm_capacity)))))
+    print(f">> Using {num_workers} workers (capacity ~{per_worker_rpm_capacity} rpm/worker) to achieve {req_min} requests per minute")
     # Split the global REQ_MIN target across workers
     per_worker_req_per_sec = (req_min / max(1, num_workers)) / 60.0
 
