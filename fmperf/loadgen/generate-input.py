@@ -139,7 +139,8 @@ def generate_vllm_request(config, url):
 
     tokenizer = AutoTokenizer.from_pretrained(model, **tokenizer_kwargs)
 
-    prompt_ids = tokenizer(next(text_generator)).input_ids[-config["in_tokens"] :]
+    source_text = next(text_generator)
+    prompt_ids = tokenizer(source_text).input_ids[-config["in_tokens"] :]
 
     request = {
         "model": model,
@@ -188,7 +189,14 @@ def generate_vllm_request(config, url):
     # let's check if we get one output per token (not the case for TGIS)
     assert len(expected) == config["out_tokens"]
 
-    return request, expected
+    # Derive human-readable prompt text via tokenizer decode for logging
+    try:
+        prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+    except Exception:
+        # Fallback: if decode fails, store token IDs string
+        prompt_text = f"<token_ids:{len(prompt_ids)}>"
+
+    return request, expected, prompt_text, len(prompt_ids)
 
 
 def generate_tgis_request(config, url):
@@ -266,7 +274,10 @@ def generate_tgis_request(config, url):
             response.append(tmp)
             last_token_time = timestamp
 
-    return request, response
+    # Prompt text is sent in the request; token count equals configured input budget
+    prompt_text = request["request"]["text"]
+    prompt_token_count = config["in_tokens"]
+    return request, response, prompt_text, prompt_token_count
 
 
 np.random.seed(42)
@@ -370,9 +381,13 @@ for sample_idx in range(sample_size):
     for attempt in range(1, attempts_per_sample + 1):
         try:
             if target == "tgis":
-                case["request"], case["expected"] = generate_tgis_request(config, url)
+                req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url)
+                case["request"], case["expected"] = req, expected
+                case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
             elif target == "vllm":  # StackSpec will also use this
-                case["request"], case["expected"] = generate_vllm_request(config, url)
+                req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url)
+                case["request"], case["expected"] = req, expected
+                case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
             else:
                 raise ValueError(f"Invalid target: {target}")
 

@@ -2,6 +2,11 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import os
+import json
+import subprocess
+import time
+from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
 
 #
 # Configuration loader: read values from .env without modifying the file.
@@ -307,6 +312,65 @@ def run_experiment_for_tokens(tokens):
     os.chdir('..')
     run_command("python -u -m fmperf.loadgen.generate-input", wait=True)
     
+    def _get_prompt_info():
+        """Read prompt text and token count from generated requests file."""
+        try:
+            req_filename = os.environ.get("REQUESTS_FILENAME", REQUESTS_FILENAME)
+            path = os.path.join(REQUESTS_DIR, req_filename)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) > 0:
+                case = data[0]
+                prompt_text = case.get("prompt_text")
+                prompt_token_count = case.get("prompt_token_count")
+                # Fallbacks
+                if prompt_text is None:
+                    req = case.get("request", {})
+                    if isinstance(req, dict) and "request" in req and isinstance(req["request"], dict):
+                        prompt_text = req["request"].get("text")
+                if prompt_token_count is None:
+                    req = case.get("request", {})
+                    if isinstance(req, dict) and "prompt" in req and isinstance(req["prompt"], list):
+                        prompt_token_count = len(req["prompt"])
+                    elif isinstance(case.get("config"), dict) and "in_tokens" in case["config"]:
+                        prompt_token_count = case["config"]["in_tokens"]
+                return prompt_text, prompt_token_count
+        except Exception as e:
+            print(f"Warning: unable to read prompt info: {e}")
+        return None, None
+
+    def _compute_median_response_tokens():
+        """Compute median tokens per full response from results file."""
+        try:
+            results_path = os.path.join(REQUESTS_DIR, RESULTS_FILENAME)
+            with open(results_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            rows = payload["results"] if isinstance(payload, dict) and "results" in payload else payload
+            if not isinstance(rows, list):
+                return None
+            totals = {}
+            for r in rows:
+                rid = r.get("request_idx")
+                n = r.get("n_tokens", 0)
+                if rid is None:
+                    continue
+                try:
+                    n_val = float(n)
+                except Exception:
+                    n_val = 0.0
+                totals[rid] = totals.get(rid, 0.0) + n_val
+            values = list(totals.values())
+            if not values:
+                return 0.0
+            values.sort()
+            mid = len(values) // 2
+            if len(values) % 2 == 1:
+                return float(values[mid])
+            return (values[mid - 1] + values[mid]) / 2.0
+        except Exception as e:
+            print(f"Warning: unable to compute median response tokens: {e}")
+            return None
+
     while iteration < max_iterations:
         iteration += 1
         print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}, REQ_MIN={req_min} ---")
@@ -344,6 +408,18 @@ def run_experiment_for_tokens(tokens):
             req_min, M, m, retry_count_stage2 = update_stage_2(
                 evaluation_result, req_min, M, m, retry_count_stage2
             )
+
+        # End-of-iteration logging: prompt and median response tokens
+        prompt_text, prompt_token_count = _get_prompt_info()
+        median_resp_tokens = _compute_median_response_tokens()
+        print("--- Iteration summary ---")
+        if prompt_text is not None:
+            display_text = prompt_text if len(str(prompt_text)) <= 400 else str(prompt_text)[:400] + "..."
+            print(f"Prompt: {display_text}")
+        if prompt_token_count is not None:
+            print(f"Prompt token count: {prompt_token_count}")
+        if median_resp_tokens is not None:
+            print(f"Median tokens per response: {median_resp_tokens:.3f}")
         
     # Small delay to avoid overwhelming the system
         time.sleep(1)
