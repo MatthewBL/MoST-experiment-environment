@@ -251,7 +251,9 @@ if __name__ == "__main__":
                 break
 
     if skip_statistical_analysis_due_to_success_rate:
-        print(f"Overall {STAT_DIFF_COL}: {experiment_has_no_statistical_difference_overall} (due to low success rate)")
+        # If any dataset has success_rate < 0.95, force overall result to FALSE
+        final_result = False
+        print(f"Overall {STAT_DIFF_COL}: {final_result} (due to low success rate)")
     else:
         # Perform statistical comparisons
         global_min_ts = min(min_ts.values())
