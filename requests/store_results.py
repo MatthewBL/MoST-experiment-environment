@@ -330,21 +330,24 @@ def main():
         else:
             stage = os.environ.get('STAGE', '')
         
-        # Resolve tokens and REQ_MIN: prefer CLI args, then env, then .env
+        # Resolve tokens, REQ_MIN, and EVALUATION: prefer CLI args, then env, then .env
         min_input_tokens = ''
         min_output_tokens = ''
         req_min = ''
+        evaluation_flag = ''
 
         # CLI args provided from experiment_automation.py
         if len(sys.argv) >= 10:
             min_input_tokens = sys.argv[7]
             min_output_tokens = sys.argv[8]
             req_min = sys.argv[9]
+            evaluation_flag = sys.argv[10]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
             min_output_tokens = os.environ.get('MAX_OUTPUT_TOKENS', '') or os.environ.get('MIN_OUTPUT_TOKENS', '')
             req_min = os.environ.get('REQ_MIN', '')
+            evaluation_flag = os.environ.get('EVALUATION', '')
 
         # Fallback to .env only if still missing
         if (min_input_tokens == '' or min_output_tokens == '' or req_min == '') and os.path.exists('../.env'):
@@ -357,23 +360,29 @@ def main():
                         min_output_tokens = line.split('=', 1)[1]
                     elif req_min == '' and line.startswith('REQ_MIN='):
                         req_min = line.split('=', 1)[1]
+                    elif evaluation_flag == '' and line.startswith('EVALUATION='):
+                        evaluation_flag = line.split('=', 1)[1]
         
-        # Get evaluation from output.csv and attempt to read success rate
-        evaluation = ''
+        # Evaluation: use explicit flag from CLI/env; also attempt to read success rate from output.csv
+        evaluation = (evaluation_flag or '').strip()
+        # Normalize evaluation to TRUE/FALSE if possible
+        if evaluation.lower() in {'true', '1', 'yes'}:
+            evaluation = 'TRUE'
+        elif evaluation.lower() in {'false', '0', 'no'}:
+            evaluation = 'FALSE'
+
         success_rate = ''
-        with open("output.csv", 'r', encoding="utf-8") as file:
-            reader = csv.DictReader(file)
-            row = next(reader, None)
-            if row:
-                for key in ('no_statistical_difference_overall', 'no_statistical_difference'):
-                    if key in row:
-                        evaluation = row.get(key, '')
-                        break
-                # best-effort for success rate-like columns
-                for k in row.keys():
-                    if 'success' in k.lower():
-                        success_rate = str(row.get(k) or '')
-                        break
+        try:
+            with open("output.csv", 'r', encoding="utf-8") as file:
+                reader = csv.DictReader(file)
+                row = next(reader, None)
+                if row:
+                    for k in row.keys():
+                        if 'success' in k.lower():
+                            success_rate = str(row.get(k) or '')
+                            break
+        except Exception:
+            pass
 
         # Duration from .env
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')

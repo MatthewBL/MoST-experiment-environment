@@ -191,10 +191,11 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         min_in = os.environ.get('MIN_INPUT_TOKENS', '')
         min_out = os.environ.get('MIN_OUTPUT_TOKENS', '')
         req_min = os.environ.get('REQ_MIN', '')
+        evaluation_flag = "TRUE" if evaluation_success else "FALSE"
         store_command = (
             f'python -u store_results.py '
             f'"{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}" '
-            f'"{min_in}" "{min_out}" "{req_min}"'
+            f'"{min_in}" "{min_out}" "{req_min}" "{evaluation_flag}"'
         )
         run_command(store_command)
         
