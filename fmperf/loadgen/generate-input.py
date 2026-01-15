@@ -152,7 +152,6 @@ def generate_vllm_request(config, url):
         "stream": True,
         "stream_options": {"include_usage": True, "continuous_usage_stats": True},
         "stop": [],
-        "ignore_eos": True,
     }
 
     if not args.from_model:
