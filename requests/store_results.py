@@ -35,7 +35,7 @@ def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     # Search upwards a few levels
     try:
         start = Path.cwd()
-        for up in [start, *start.parents[:4]]:
+        for up in [start, *start.parents[:6]]:
             if job:
                 p = up / f"slurm-{job}.out"
                 if p.exists():
@@ -75,16 +75,12 @@ def _extract_model_from_slurm(slurm_path: str | None) -> str:
     ]
     try:
         with open(slurm_path, "r", encoding="utf-8", errors="ignore") as f:
-            # Limit to first ~2000 lines to favor the beginning of file
             for i, line in enumerate(f):
-                if i > 2000:
-                    break
                 s = line.strip()
                 for pat in patterns:
                     m = re.search(pat, s, re.IGNORECASE)
                     if m:
                         val = m.group(1).strip()
-                        # sanitize
                         return val.replace("\x00", "").strip()
     except Exception:
         pass
@@ -93,7 +89,10 @@ def _extract_model_from_slurm(slurm_path: str | None) -> str:
 def _read_prompt_info(sample_path: Path) -> tuple[str | None, str | None]:
     """Return (prompt_text, prompt_token_count) from sample_requests.json if available."""
     if not sample_path.exists():
-        return None, None
+        alt = Path("..") / sample_path.name
+        if not alt.exists():
+            return None, None
+        sample_path = alt
     try:
         data = json.loads(sample_path.read_text(encoding="utf-8"))
         items = []
@@ -148,6 +147,16 @@ def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str
                 reader = csv.DictReader(f)
                 row = next(reader, None)
                 if row:
+                    # direct median columns if present
+                    for k in row.keys():
+                        kl = k.lower()
+                        if "median" in kl and "token" in kl:
+                            try:
+                                val = str(row.get(k, ""))
+                                if val:
+                                    median_tokens = val
+                            except Exception:
+                                pass
                     # prioritize fields named like success_rate/ratio
                     def find_col(cols: list[str]) -> str | None:
                         for c in cols:
@@ -206,7 +215,7 @@ def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str
 
                 if isinstance(rsi, (int, float, str)):
                     try:
-                        val = int(rsi)
+                        val = int(float(rsi))
                         prev = max_resp_idx.get(key, -1)
                         if val > prev:
                             max_resp_idx[key] = val
@@ -356,9 +365,10 @@ def main():
             reader = csv.DictReader(file)
             row = next(reader, None)
             if row:
-                # evaluation boolean often in 'no_statistical_difference'
-                if 'no_statistical_difference' in row:
-                    evaluation = row.get('no_statistical_difference', '')
+                for key in ('no_statistical_difference_overall', 'no_statistical_difference'):
+                    if key in row:
+                        evaluation = row.get(key, '')
+                        break
                 # best-effort for success rate-like columns
                 for k in row.keys():
                     if 'success' in k.lower():
@@ -385,11 +395,11 @@ def main():
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
             writer = csv.writer(file)
-            # Write header with requested fields
+            # Write header with requested fields (remove GPUS/CPUS)
             writer.writerow([
                 "MODEL_USED", "INPUT_TOKENS", "OUTPUT_TOKENS", "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "PROMPT_TOKEN_COUNT",
-                "PROMPT_TEXT", "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "GPUS", "CPUS", "NODE", "STAGE"
+                "PROMPT_TEXT", "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "NODE", "STAGE"
             ])
             # Write data row
             writer.writerow([
@@ -405,7 +415,7 @@ def main():
                 (prompt_text or '').replace('\n', ' ').strip(),
                 median_resp_tokens or '',
                 job_id or '',
-                gpus, cpus, node, stage
+                node, stage
             ])
         
         print(f"Created results.csv in {full_dir_path}")
