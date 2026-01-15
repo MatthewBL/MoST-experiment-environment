@@ -146,10 +146,13 @@ def generate_vllm_request(config, url):
         "model": model,
         "prompt": prompt_ids,
         "ignore_eos": True,
+        "min_tokens": config["out_tokens"],
         "max_tokens": config["out_tokens"],
         "seed": 42,
         "stream": True,
         "stream_options": {"include_usage": True, "continuous_usage_stats": True},
+        "stop": [],
+        "ignore_eos": True,
     }
 
     if not args.from_model:
