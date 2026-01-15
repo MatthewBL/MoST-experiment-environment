@@ -244,14 +244,14 @@ if __name__ == "__main__":
     
     for name, df in datasets.items():
         if "success_rate" in df.columns:
-            if (df["success_rate"] < 0.95).any():
-                print(f"Success rate below 0.95 in {name}")
+            if (df["success_rate"] < 95).any():
+                print(f"Success rate below 95% in {name}")
                 experiment_has_no_statistical_difference_overall = False
                 skip_statistical_analysis_due_to_success_rate = True
                 break
 
     if skip_statistical_analysis_due_to_success_rate:
-        # If any dataset has success_rate < 0.95, force overall result to FALSE
+        # If any dataset has success_rate < 95%, force overall result to FALSE
         final_result = False
         print(f"Overall {STAT_DIFF_COL}: {final_result} (due to low success rate)")
     else:
