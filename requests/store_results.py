@@ -348,15 +348,17 @@ def main():
         else:
             stage = os.environ.get('STAGE', '')
         
-        # Resolve tokens, REQ_MIN, EVALUATION, and MEDIAN: prefer CLI args, then env/log, then .env
+        # Resolve tokens, REQ_MIN, EVALUATION, MEDIAN, and PROMPT INFO: prefer CLI args, then env/log, then .env
         min_input_tokens = ''
         min_output_tokens = ''
         req_min = ''
         evaluation_flag = ''
         median_cli = ''
+        prompt_token_count_cli = ''
+        prompt_text_cli = ''
 
         # CLI args provided from experiment_automation.py
-        # Expect: 1:model 2:gpus 3:cpus 4:node 5:stage 6:parent_dir 7:min_in 8:min_out 9:req_min 10:evaluation 11:median
+        # Expect: 1:model 2:gpus 3:cpus 4:node 5:stage 6:parent_dir 7:min_in 8:min_out 9:req_min 10:evaluation 11:median 12:prompt_token_count 13:prompt_text
         if len(sys.argv) >= 11:
             min_input_tokens = sys.argv[7]
             min_output_tokens = sys.argv[8]
@@ -364,12 +366,18 @@ def main():
             evaluation_flag = sys.argv[10]
             if len(sys.argv) >= 12:
                 median_cli = sys.argv[11]
+            if len(sys.argv) >= 13:
+                prompt_token_count_cli = sys.argv[12]
+            if len(sys.argv) >= 14:
+                prompt_text_cli = sys.argv[13]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
             min_output_tokens = os.environ.get('MAX_OUTPUT_TOKENS', '') or os.environ.get('MIN_OUTPUT_TOKENS', '')
             req_min = os.environ.get('REQ_MIN', '')
             evaluation_flag = os.environ.get('EVALUATION', '')
+            prompt_token_count_cli = os.environ.get('PROMPT_TOKEN_COUNT', '')
+            prompt_text_cli = os.environ.get('PROMPT_TEXT', '')
 
         # Fallback to .env only if still missing
         if (min_input_tokens == '' or min_output_tokens == '' or req_min == '') and os.path.exists('../.env'):
@@ -409,8 +417,15 @@ def main():
         # Duration from .env
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
 
-        # Prompt info from sample_requests.json
-        prompt_text, prompt_token_count = _read_prompt_info(Path('sample_requests.json'))
+        # Prompt info: prefer CLI/env-provided values, then fallback to sample_requests.json
+        prompt_text = (prompt_text_cli or '').strip()
+        prompt_token_count = (prompt_token_count_cli or '').strip()
+        if not prompt_text or not prompt_token_count:
+            pt, ptc = _read_prompt_info(Path('sample_requests.json'))
+            if not prompt_text:
+                prompt_text = (pt or '')
+            if not prompt_token_count:
+                prompt_token_count = (ptc or '')
 
         # Job ID and Slurm model extraction
         job_id_env = os.environ.get('SLURM_JOB_ID')

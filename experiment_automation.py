@@ -452,12 +452,16 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             os.chdir('requests')
             evaluation_flag = "TRUE" if evaluation_result else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
-            store_command = (
-                f'python -u store_results.py '
-                f'"{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}" '
-                f'"{tokens[0]}" "{tokens[1]}" "{req_min}" "{evaluation_flag}" "{median_str}"'
-            )
-            run_command(store_command)
+            # Pass prompt details directly to store_results.py to avoid re-parsing
+            store_args = [
+                "python", "-u", "store_results.py",
+                str(model), str(gpus), str(cpus), str(node), str(stage), str(parent_dir),
+                str(tokens[0]), str(tokens[1]), str(req_min), str(evaluation_flag), str(median_str),
+                str(prompt_token_count if prompt_token_count is not None else ''),
+                str(prompt_text if prompt_text is not None else '')
+            ]
+            print("Running (args):", " ".join(store_args))
+            subprocess.run(store_args)
         finally:
             os.chdir(original_dir2)
         
