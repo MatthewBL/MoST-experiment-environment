@@ -408,6 +408,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         print(f"Evaluation result: {'Success' if evaluation_result else 'Failure'}")
         if stage == 2 and not evaluation_result:
             print(f"Retry count: {retry_count_stage2}")
+        # Capture the REQ_MIN used for this evaluation before any update logic
+        req_min_used = req_min
         
         # Step 8: Check termination condition (for stage 2)
         if stage == 2:
@@ -456,7 +458,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             store_args = [
                 "python", "-u", "store_results.py",
                 str(model), str(gpus), str(cpus), str(node), str(stage), str(parent_dir),
-                str(tokens[0]), str(tokens[1]), str(req_min), str(evaluation_flag), str(median_str),
+                str(tokens[0]), str(tokens[1]), str(req_min_used), str(evaluation_flag), str(median_str),
                 str(prompt_token_count if prompt_token_count is not None else ''),
                 str(prompt_text if prompt_text is not None else '')
             ]
