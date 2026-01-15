@@ -1,9 +1,252 @@
 import os
+import re
 import csv
+import json
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Best-effort helpers to enrich results.csv with requested fields
+def _read_env_value(env_path: Path, key: str, default: str = "") -> str:
+    try:
+        if env_path.exists():
+            with env_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith(key + "="):
+                        return line.split("=", 1)[1]
+    except Exception:
+        pass
+    return default
+
+def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
+    """Return (job_id, slurm_log_path) if found.
+    - Prefer $SLURM_JOB_ID
+    - Look for slurm-<jobid>.out upward from CWD
+    - Fallback to most recent slurm-*.out in CWD or parents
+    """
+    # Normalize to string
+    job = job_id or os.environ.get("SLURM_JOB_ID")
+    candidates: list[Path] = []
+
+    # Search upwards a few levels
+    try:
+        start = Path.cwd()
+        for up in [start, *start.parents[:4]]:
+            if job:
+                p = up / f"slurm-{job}.out"
+                if p.exists():
+                    return job, str(p)
+            # collect any slurm-*.out as fallback
+            for entry in up.glob("slurm-*.out"):
+                candidates.append(entry)
+    except Exception:
+        pass
+
+    if candidates:
+        # Pick the most recently modified
+        try:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            picked = candidates[0]
+            # extract job id from filename if possible
+            m = re.search(r"slurm-(\d+)\.out$", picked.name)
+            jid = m.group(1) if m else (job or None)
+            return jid, str(picked)
+        except Exception:
+            pass
+
+    return job, None
+
+def _extract_model_from_slurm(slurm_path: str | None) -> str:
+    """Heuristically extract model name from the beginning of a Slurm log.
+    Looks for common patterns like 'MODEL: <name>' or 'Model used: <name>'.
+    """
+    if not slurm_path:
+        return ""
+    patterns = [
+        r"\bMODEL\s*[:=]\s*([^\s,]+)",
+        r"\bModel used\s*[:=]\s*(.+)",
+        r"\bUsing model\s*[:=]?\s*(.+)",
+        r"\b--model\s+([^\s]+)",
+        r"\bmodel\s*[:=]\s*([^\s,]+)",
+    ]
+    try:
+        with open(slurm_path, "r", encoding="utf-8", errors="ignore") as f:
+            # Limit to first ~2000 lines to favor the beginning of file
+            for i, line in enumerate(f):
+                if i > 2000:
+                    break
+                s = line.strip()
+                for pat in patterns:
+                    m = re.search(pat, s, re.IGNORECASE)
+                    if m:
+                        val = m.group(1).strip()
+                        # sanitize
+                        return val.replace("\x00", "").strip()
+    except Exception:
+        pass
+    return ""
+
+def _read_prompt_info(sample_path: Path) -> tuple[str | None, str | None]:
+    """Return (prompt_text, prompt_token_count) from sample_requests.json if available."""
+    if not sample_path.exists():
+        return None, None
+    try:
+        data = json.loads(sample_path.read_text(encoding="utf-8"))
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            # try common container keys
+            for key in ("requests", "data", "items"):
+                if isinstance(data.get(key), list):
+                    items = data[key]
+                    break
+            if not items:
+                items = [data]
+
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # prompt text keys in order of likelihood
+            for tkey in ("prompt", "text", "inputs", "input", "query"):
+                if isinstance(it.get(tkey), str) and it.get(tkey).strip():
+                    prompt_text = it.get(tkey).strip()
+                    break
+            else:
+                prompt_text = None
+
+            # token count keys seen in generators
+            for k in ("prompt_token_count", "input_token_count", "prompt_len", "input_tokens"):
+                v = it.get(k)
+                if isinstance(v, (int, float, str)):
+                    return prompt_text, str(v)
+            # If not present, still return text (count unknown)
+            if prompt_text:
+                return prompt_text, None
+        return None, None
+    except Exception:
+        return None, None
+
+def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str | None, str | None]:
+    """Compute (median_response_tokens, total_requests, success_rate) from results/output CSV/JSON.
+    - total_requests: unique requests inferred from response_idx resets or request_idx values.
+    - success_rate: best-effort read from output.csv if a column with 'success' exists.
+    """
+    median_tokens = None
+    total_requests = None
+    success_rate = None
+
+    # success rate from output.csv if present
+    try:
+        out_csv = Path("output.csv")
+        if out_csv.exists():
+            with out_csv.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                row = next(reader, None)
+                if row:
+                    # prioritize fields named like success_rate/ratio
+                    def find_col(cols: list[str]) -> str | None:
+                        for c in cols:
+                            if c in row:
+                                return c
+                        return None
+                    # try exact/common names
+                    col = find_col([
+                        "success_rate", "success_ratio", "success", "pass_rate", "accuracy"
+                    ])
+                    if not col:
+                        # case-insensitive contains 'success'
+                        for k in row.keys():
+                            if "success" in k.lower():
+                                col = k
+                                break
+                    if col:
+                        success_rate = str(row.get(col, ""))
+    except Exception:
+        pass
+
+    # Compute tokens and requests from results.json if available
+    try:
+        if results_path.exists():
+            data = json.loads(results_path.read_text(encoding="utf-8"))
+            # Normalize iterable of events or responses
+            if isinstance(data, dict) and isinstance(data.get("results"), list):
+                items = data["results"]
+            elif isinstance(data, list):
+                items = data
+            else:
+                items = []
+
+            # Track per-request max response_idx
+            max_resp_idx: dict[tuple[int | None, int | None], int] = {}
+            # Fallback request sequencing if request_idx missing
+            current_rid = -1
+
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("request_idx")
+                wid = it.get("worker_idx")
+                rsi = it.get("response_idx")
+
+                # derive rid when missing: response_idx==0 indicates new request
+                if rid is None:
+                    if isinstance(rsi, (int, float)) and int(rsi) == 0:
+                        current_rid += 1
+                    if current_rid < 0:
+                        current_rid = 0
+                    rid = current_rid
+
+                key = (int(wid) if isinstance(wid, (int, float, str)) and str(wid).isdigit() else None,
+                       int(rid) if isinstance(rid, (int, float, str)) and str(rid).lstrip("-+").isdigit() else None)
+
+                if isinstance(rsi, (int, float, str)):
+                    try:
+                        val = int(rsi)
+                        prev = max_resp_idx.get(key, -1)
+                        if val > prev:
+                            max_resp_idx[key] = val
+                    except Exception:
+                        pass
+
+            if max_resp_idx:
+                # token count per request = max response_idx + 1
+                token_counts = [v + 1 for v in max_resp_idx.values() if isinstance(v, int) and v >= 0]
+                if token_counts:
+                    token_counts.sort()
+                    n = len(token_counts)
+                    if n % 2 == 1:
+                        median_tokens = str(token_counts[n // 2])
+                    else:
+                        median_tokens = str((token_counts[n // 2 - 1] + token_counts[n // 2]) / 2)
+                total_requests = str(len(max_resp_idx))
+    except Exception:
+        pass
+
+    # If results.json unavailable, attempt to derive total from first/second_half.csv
+    if total_requests is None:
+        try:
+            fh = Path("first_half.csv")
+            sh = Path("second_half.csv")
+            count = 0
+            for p in (fh, sh):
+                if p.exists():
+                    with p.open("r", encoding="utf-8", newline="") as f:
+                        reader = csv.reader(f)
+                        rows = list(reader)
+                        # naive: subtract header
+                        if rows:
+                            count += max(0, len(rows) - 1)
+            if count:
+                total_requests = str(count)
+        except Exception:
+            pass
+
+    return median_tokens, total_requests, success_rate
 
 def main():
     try:
@@ -106,27 +349,64 @@ def main():
                     elif req_min == '' and line.startswith('REQ_MIN='):
                         req_min = line.split('=', 1)[1]
         
-        # Get evaluation from output.csv
+        # Get evaluation from output.csv and attempt to read success rate
         evaluation = ''
-        with open("output.csv", 'r') as file:
-            reader = csv.reader(file)
-            rows = list(reader)
-            if len(rows) > 0:
-                # Find the column index for "no_statistical_difference"
-                header = rows[0]
-                if 'no_statistical_difference' in header:
-                    no_statistical_difference_index = header.index('no_statistical_difference')
-                    if len(rows) > 1:
-                        evaluation = rows[1][no_statistical_difference_index] if len(rows[1]) > no_statistical_difference_index else ''
+        success_rate = ''
+        with open("output.csv", 'r', encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            row = next(reader, None)
+            if row:
+                # evaluation boolean often in 'no_statistical_difference'
+                if 'no_statistical_difference' in row:
+                    evaluation = row.get('no_statistical_difference', '')
+                # best-effort for success rate-like columns
+                for k in row.keys():
+                    if 'success' in k.lower():
+                        success_rate = str(row.get(k) or '')
+                        break
+
+        # Duration from .env
+        duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
+
+        # Prompt info from sample_requests.json
+        prompt_text, prompt_token_count = _read_prompt_info(Path('sample_requests.json'))
+
+        # Median response token count and total number of requests
+        median_resp_tokens, total_requests, sr_from_results = _compute_median_response_tokens(Path('results.json'))
+        if not success_rate and sr_from_results:
+            success_rate = sr_from_results
+
+        # Job ID and Slurm model extraction
+        job_id_env = os.environ.get('SLURM_JOB_ID')
+        job_id, slurm_path = _find_slurm_log(job_id_env)
+        model_from_slurm = _extract_model_from_slurm(slurm_path)
 
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
             writer = csv.writer(file)
-            # Write header with new STAGE column
-            writer.writerow(["MODEL", "GPUS", "CPUS", "NODE", "STAGE", "INPUT_TOKENS", "OUTPUT_TOKENS", "EVALUATION", "REQ_MIN"])
-            # Write data row with stage value
-            writer.writerow([model, gpus, cpus, node, stage, min_input_tokens, min_output_tokens, evaluation, req_min])
+            # Write header with requested fields
+            writer.writerow([
+                "MODEL_USED", "INPUT_TOKENS", "OUTPUT_TOKENS", "REQ_MIN", "EVALUATION",
+                "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "PROMPT_TOKEN_COUNT",
+                "PROMPT_TEXT", "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "GPUS", "CPUS", "NODE", "STAGE"
+            ])
+            # Write data row
+            writer.writerow([
+                model_from_slurm or model,
+                min_input_tokens,
+                min_output_tokens,
+                req_min,
+                evaluation,
+                duration,
+                total_requests or '',
+                success_rate or '',
+                prompt_token_count or '',
+                (prompt_text or '').replace('\n', ' ').strip(),
+                median_resp_tokens or '',
+                job_id or '',
+                gpus, cpus, node, stage
+            ])
         
         print(f"Created results.csv in {full_dir_path}")
         
