@@ -187,18 +187,6 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
             # Evaluation.py returns 0 for success, non-zero for failure
             evaluation_success = (result.returncode == 0)
         
-        # Step 8: Store results with explicit tokens and REQ_MIN to avoid relying on .env
-        min_in = os.environ.get('MIN_INPUT_TOKENS', '')
-        min_out = os.environ.get('MIN_OUTPUT_TOKENS', '')
-        req_min = os.environ.get('REQ_MIN', '')
-        evaluation_flag = "TRUE" if evaluation_success else "FALSE"
-        store_command = (
-            f'python -u store_results.py '
-            f'"{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}" '
-            f'"{min_in}" "{min_out}" "{req_min}" "{evaluation_flag}"'
-        )
-        run_command(store_command)
-        
         return evaluation_success
         
     finally:
@@ -457,6 +445,21 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             print(f"Prompt token count: {prompt_token_count}")
         if median_resp_tokens is not None:
             print(f"Median tokens per response: {median_resp_tokens:.3f}")
+
+        # Persist results with explicit values, including the printed median
+        try:
+            original_dir2 = os.getcwd()
+            os.chdir('requests')
+            evaluation_flag = "TRUE" if evaluation_result else "FALSE"
+            median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
+            store_command = (
+                f'python -u store_results.py '
+                f'"{model}" "{gpus}" "{cpus}" "{node}" "{stage}" "{parent_dir}" '
+                f'"{tokens[0]}" "{tokens[1]}" "{req_min}" "{evaluation_flag}" "{median_str}"'
+            )
+            run_command(store_command)
+        finally:
+            os.chdir(original_dir2)
         
     # Small delay to avoid overwhelming the system
         time.sleep(1)

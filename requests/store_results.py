@@ -86,6 +86,24 @@ def _extract_model_from_slurm(slurm_path: str | None) -> str:
         pass
     return ""
 
+def _extract_median_tokens_from_log(slurm_path: str | None) -> str | None:
+    """Parse the latest 'Median tokens per response: <value>' printed by experiment_automation.
+    Prefer the last occurrence in the Slurm log; return None if unavailable.
+    """
+    if not slurm_path:
+        return None
+    try:
+        last_val: str | None = None
+        pat = re.compile(r"Median tokens per response:\s*([0-9]+(?:\.[0-9]+)?)")
+        with open(slurm_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = pat.search(line)
+                if m:
+                    last_val = m.group(1)
+        return last_val
+    except Exception:
+        return None
+
 def _read_prompt_info(sample_path: Path) -> tuple[str | None, str | None]:
     """Return (prompt_text, prompt_token_count) from sample_requests.json if available."""
     if not sample_path.exists():
@@ -330,18 +348,22 @@ def main():
         else:
             stage = os.environ.get('STAGE', '')
         
-        # Resolve tokens, REQ_MIN, and EVALUATION: prefer CLI args, then env, then .env
+        # Resolve tokens, REQ_MIN, EVALUATION, and MEDIAN: prefer CLI args, then env/log, then .env
         min_input_tokens = ''
         min_output_tokens = ''
         req_min = ''
         evaluation_flag = ''
+        median_cli = ''
 
         # CLI args provided from experiment_automation.py
-        if len(sys.argv) >= 10:
+        # Expect: 1:model 2:gpus 3:cpus 4:node 5:stage 6:parent_dir 7:min_in 8:min_out 9:req_min 10:evaluation 11:median
+        if len(sys.argv) >= 11:
             min_input_tokens = sys.argv[7]
             min_output_tokens = sys.argv[8]
             req_min = sys.argv[9]
             evaluation_flag = sys.argv[10]
+            if len(sys.argv) >= 12:
+                median_cli = sys.argv[11]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -390,15 +412,22 @@ def main():
         # Prompt info from sample_requests.json
         prompt_text, prompt_token_count = _read_prompt_info(Path('sample_requests.json'))
 
-        # Median response token count and total number of requests
-        median_resp_tokens, total_requests, sr_from_results = _compute_median_response_tokens(Path('results.json'))
-        if not success_rate and sr_from_results:
-            success_rate = sr_from_results
-
         # Job ID and Slurm model extraction
         job_id_env = os.environ.get('SLURM_JOB_ID')
         job_id, slurm_path = _find_slurm_log(job_id_env)
         model_from_slurm = _extract_model_from_slurm(slurm_path)
+
+        # Median response tokens: prefer CLI-provided value from experiment_automation;
+        # fall back to log-parsed value, then computed from results.json/output.csv
+        median_resp_tokens = median_cli if (median_cli and str(median_cli).strip() != '') else None
+        if median_resp_tokens is None:
+            log_median = _extract_median_tokens_from_log(slurm_path)
+            median_resp_tokens = log_median if log_median else None
+        comp_median, total_requests, sr_from_results = _compute_median_response_tokens(Path('results.json'))
+        if median_resp_tokens is None:
+            median_resp_tokens = comp_median
+        if not success_rate and sr_from_results:
+            success_rate = sr_from_results
 
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
