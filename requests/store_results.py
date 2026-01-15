@@ -24,34 +24,68 @@ def _read_env_value(env_path: Path, key: str, default: str = "") -> str:
 
 def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     """Return (job_id, slurm_log_path) if found.
-    - Prefer $SLURM_JOB_ID
-    - Look for slurm-<jobid>.out upward from CWD
-    - Fallback to most recent slurm-*.out in CWD or parents
+    Strategy:
+    - Prefer explicit job: look for slurm-<jobid>.out
+      in likely roots: CWD, script dir, and script dir's parent (project root).
+    - If not found, fallback to most recent slurm-*.out among those roots
+      and their parents up to a few levels.
     """
-    # Normalize to string
     job = job_id or os.environ.get("SLURM_JOB_ID")
+
     candidates: list[Path] = []
 
-    # Search upwards a few levels
+    # Build a robust search set of directories
+    roots: list[Path] = []
     try:
-        start = Path.cwd()
-        for up in [start, *start.parents[:6]]:
-            if job:
+        cwd = Path.cwd()
+        roots.extend([cwd, *cwd.parents[:4]])
+    except Exception:
+        pass
+    try:
+        here = Path(__file__).resolve()
+        script_dir = here.parent
+        roots.append(script_dir)
+        # If this file lives in 'requests/', the project root is its parent
+        if script_dir.name.lower() == "requests":
+            roots.append(script_dir.parent)
+        roots.extend([*script_dir.parents[:4]])
+    except Exception:
+        pass
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique_roots: list[Path] = []
+    for r in roots:
+        try:
+            rp = r.resolve()
+        except Exception:
+            rp = r
+        if rp not in seen:
+            seen.add(rp)
+            unique_roots.append(rp)
+
+    # First pass: exact slurm-<job>.out in likely dirs
+    if job:
+        try:
+            for up in unique_roots:
                 p = up / f"slurm-{job}.out"
                 if p.exists():
                     return job, str(p)
-            # collect any slurm-*.out as fallback
+        except Exception:
+            pass
+
+    # Fallback: collect all slurm-*.out files in the search dirs
+    try:
+        for up in unique_roots:
             for entry in up.glob("slurm-*.out"):
                 candidates.append(entry)
     except Exception:
         pass
 
     if candidates:
-        # Pick the most recently modified
         try:
             candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             picked = candidates[0]
-            # extract job id from filename if possible
             m = re.search(r"slurm-(\d+)\.out$", picked.name)
             jid = m.group(1) if m else (job or None)
             return jid, str(picked)
@@ -61,12 +95,15 @@ def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     return job, None
 
 def _extract_model_from_slurm(slurm_path: str | None) -> str:
-    """Heuristically extract model name from the beginning of a Slurm log.
-    Looks for common patterns like 'MODEL: <name>' or 'Model used: <name>'.
+    """Extract model name from Slurm log.
+    Handles both free-text lines (e.g., 'MODEL: foo') and JSON lines like
+    '"model": "google/gemma-7b"'. Returns an empty string if not found.
     """
     if not slurm_path:
         return ""
+    # Put JSON-aware pattern first to match the provided log format
     patterns = [
+        r"\"model\"\s*:\s*\"([^\"]+)\"",  # JSON key: "model": "..."
         r"\bMODEL\s*[:=]\s*([^\s,]+)",
         r"\bModel used\s*[:=]\s*(.+)",
         r"\bUsing model\s*[:=]?\s*(.+)",
@@ -75,13 +112,15 @@ def _extract_model_from_slurm(slurm_path: str | None) -> str:
     ]
     try:
         with open(slurm_path, "r", encoding="utf-8", errors="ignore") as f:
-            for i, line in enumerate(f):
+            for line in f:
                 s = line.strip()
                 for pat in patterns:
                     m = re.search(pat, s, re.IGNORECASE)
                     if m:
                         val = m.group(1).strip()
-                        return val.replace("\x00", "").strip()
+                        # Sanitize quotes/padding/nulls
+                        val = val.replace("\x00", "").strip().strip('"\'')
+                        return val
     except Exception:
         pass
     return ""
@@ -332,15 +371,9 @@ def main():
         # Get values from command line arguments
         if len(sys.argv) >= 5:
             model = sys.argv[1]
-            gpus = sys.argv[2]
-            cpus = sys.argv[3]
-            node = sys.argv[4]
         else:
             # Fallback to environment variables if arguments not provided
             model = os.environ.get('MODEL', '')
-            gpus = os.environ.get('GPUS', '')
-            cpus = os.environ.get('CPUS', '')
-            node = os.environ.get('NODE', '')
         
         # Get stage from command line arguments or environment
         if len(sys.argv) >= 6:
@@ -358,7 +391,6 @@ def main():
         prompt_text_cli = ''
 
         # CLI args provided from experiment_automation.py
-        # Expect: 1:model 2:gpus 3:cpus 4:node 5:stage 6:parent_dir 7:min_in 8:min_out 9:req_min 10:evaluation 11:median 12:prompt_token_count 13:prompt_text
         if len(sys.argv) >= 11:
             min_input_tokens = sys.argv[7]
             min_output_tokens = sys.argv[8]
@@ -452,7 +484,7 @@ def main():
             writer.writerow([
                 "MODEL_USED", "INPUT_TOKENS", "OUTPUT_TOKENS", "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "PROMPT_TOKEN_COUNT",
-                "PROMPT_TEXT", "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "NODE", "STAGE"
+                "PROMPT_TEXT", "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE"
             ])
             # Write data row
             writer.writerow([
@@ -468,7 +500,7 @@ def main():
                 (prompt_text or '').replace('\n', ' ').strip(),
                 median_resp_tokens or '',
                 job_id or '',
-                node, stage
+                stage
             ])
         
         print(f"Created results.csv in {full_dir_path}")
