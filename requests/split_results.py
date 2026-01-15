@@ -22,9 +22,9 @@ ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 ENV_PATH = os.path.join(ROOT_DIR, '.env')
 ENV = _load_env(ENV_PATH)
 try:
-    BUFFER_MINUTES = int(ENV.get('FILTER_BUFFER_MINUTES', '5'))
+    BUFFER_SECONDS = int(ENV.get('FILTER_BUFFER', '300'))
 except ValueError:
-    BUFFER_MINUTES = 5
+    BUFFER_SECONDS = 300
 
 def process_experiment_data(input_file):
     # Read the CSV file
@@ -45,16 +45,16 @@ def process_experiment_data(input_file):
     print(f"Experiment ended at: {end_time}")
     print(f"Total duration: {total_duration}")
     
-    # Remove first and last N minutes (from .env: FILTER_BUFFER_MINUTES)
-    filtered_start = start_time + timedelta(minutes=BUFFER_MINUTES)
-    filtered_end = end_time - timedelta(minutes=BUFFER_MINUTES)
+    # Remove first and last N seconds (from .env: FILTER_BUFFER)
+    filtered_start = start_time + timedelta(seconds=BUFFER_SECONDS)
+    filtered_end = end_time - timedelta(seconds=BUFFER_SECONDS)
     
     filtered_df = df[
         (df['received_timestamp'] >= filtered_start) & 
         (df['received_timestamp'] <= filtered_end)
     ].copy().reset_index(drop=True)
     
-    print(f"\nAfter removing first and last {BUFFER_MINUTES} minutes:")
+    print(f"\nAfter removing first and last {BUFFER_SECONDS} minutes:")
     print(f"Filtered start: {filtered_start}")
     print(f"Filtered end: {filtered_end}")
     print(f"Filtered duration: {filtered_end - filtered_start}")

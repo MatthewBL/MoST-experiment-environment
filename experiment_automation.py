@@ -28,19 +28,41 @@ def _parse_tokens_list(value):
             continue
     return tokens
 
+def _parse_int_list(value):
+    """Parse comma-separated integers into a list. Invalid entries are skipped.
+
+    Examples:
+    - "1,2,4" -> [1, 2, 4]
+    - "8"     -> [8]
+    - "1, x"  -> [1]
+    """
+    items = []
+    if value is None:
+        return items
+    for part in str(value).split(','):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            items.append(int(p))
+        except ValueError:
+            # skip malformed entries
+            continue
+    return items
+
 def load_env_config():
     """Load configuration from .env file and return a dict.
 
     Expected keys:
     - TOKENS_LIST: comma-separated pairs like "32:32,32:64"
-    - REQ_MIN_START: integer
+    - REQ_MIN_START: comma-separated integers (per-token-combo initial REQ_MIN)
     - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
     - STOP_THRESHOLD: float (used in end condition)
     """
     env_path = Path('.env')
     config = {
         'TOKENS_LIST': [],
-        'REQ_MIN_START': 1,
+        'REQ_MIN_START': [1],
         'REQ_MIN_INCREASE_MULTIPLIER': 2,
         'STOP_THRESHOLD': 0.5,
     }
@@ -57,10 +79,14 @@ def load_env_config():
                 if key == 'TOKENS_LIST':
                     config['TOKENS_LIST'] = _parse_tokens_list(val)
                 elif key == 'REQ_MIN_START':
-                    try:
-                        config['REQ_MIN_START'] = int(val)
-                    except ValueError:
-                        pass
+                    lst = _parse_int_list(val)
+                    # Backwards compatibility: if parsing produced empty but val is a single int, wrap it
+                    if not lst:
+                        try:
+                            lst = [int(val)]
+                        except ValueError:
+                            lst = config['REQ_MIN_START']
+                    config['REQ_MIN_START'] = lst
                 elif key == 'REQ_MIN_INCREASE_MULTIPLIER':
                     try:
                         config['REQ_MIN_INCREASE_MULTIPLIER'] = int(val)
@@ -270,8 +296,12 @@ def update_stage_2(evaluation, current_req_min, M, m, retry_count_stage2):
     new_req_min = (M + m) / 2
     return new_req_min, M, m, retry_count_stage2
 
-def run_experiment_for_tokens(tokens):
-    """Run the complete experiment for a specific token combination"""
+def run_experiment_for_tokens(tokens, initial_req_min=None):
+    """Run the complete experiment for a specific token combination.
+
+    initial_req_min: optional initial value for REQ_MIN specific to this
+    token combination. If None, defaults to 1.
+    """
     # Get environment variables at the start and store them as Python variables
     model = os.environ.get('MODEL', '')
     gpus = os.environ.get('GPUS', '')
@@ -287,7 +317,7 @@ def run_experiment_for_tokens(tokens):
     
     # Step 1: Initialize stage 1
     stage = start_stage_1()
-    req_min = CONFIG.get('REQ_MIN_START', 1)  # Initial value from .env
+    req_min = initial_req_min if initial_req_min is not None else 1  # Per-combo initial value
     
     # Stage 2 variables (initialized when transitioning to stage 2)
     M_0, m_0, M, m = None, None, None, None
@@ -435,14 +465,21 @@ def run_experiment_for_tokens(tokens):
 
 def main():
     input_output_tokens = CONFIG.get('TOKENS_LIST', [])
+    req_min_starts = CONFIG.get('REQ_MIN_START', [1])
     results = {}
     
-    for tokens in input_output_tokens:
+    for idx, tokens in enumerate(input_output_tokens):
         print(f"\n{'='*60}")
         print(f"Starting experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
         print(f"{'='*60}")
         
-        result = run_experiment_for_tokens(tokens)
+        # Pick initial REQ_MIN by index; if not enough values, use the last one
+        if req_min_starts:
+            initial_req_min = req_min_starts[idx] if idx < len(req_min_starts) else req_min_starts[-1]
+        else:
+            initial_req_min = 1
+        
+        result = run_experiment_for_tokens(tokens, initial_req_min)
         results[f"{tokens[0]}_{tokens[1]}"] = result
         
         print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
