@@ -63,7 +63,7 @@ def load_env_config():
     config = {
         'TOKENS_LIST': [],
         'REQ_MIN_START': [1],
-        'REQ_MIN_INCREASE_MULTIPLIER': 2,
+        'REQ_MIN_INCREASE_MULTIPLIER': 2.0,
         'STOP_THRESHOLD': 0.5,
     }
 
@@ -89,7 +89,7 @@ def load_env_config():
                     config['REQ_MIN_START'] = lst
                 elif key == 'REQ_MIN_INCREASE_MULTIPLIER':
                     try:
-                        config['REQ_MIN_INCREASE_MULTIPLIER'] = int(val)
+                        config['REQ_MIN_INCREASE_MULTIPLIER'] = float(val)
                     except ValueError:
                         pass
                 elif key == 'STOP_THRESHOLD':
@@ -219,7 +219,7 @@ def update_stage_1(evaluation, current_req_min, retry_count_stage1, highest_true
 
     Returns: (stage, new_req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false)
     """
-    multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2)
+    multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2.0)
 
     if evaluation:
         # Successful evaluation: record lower bound and clear any pending failure retry
@@ -231,7 +231,8 @@ def update_stage_1(evaluation, current_req_min, retry_count_stage1, highest_true
 
         if lowest_false is None:
             # No confirmed FALSE yet → keep increasing
-            new_req_min = current_req_min * multiplier
+            # Use float multiplier, keep REQ_MIN as integer via rounding
+            new_req_min = max(1, int(round(current_req_min * multiplier)))
             return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
         else:
             # We have a confirmed FALSE and at least one TRUE → transition to stage 2
@@ -256,7 +257,8 @@ def update_stage_1(evaluation, current_req_min, retry_count_stage1, highest_true
 
             if highest_true is None:
                 # No TRUE yet: keep decreasing to find a TRUE bound
-                new_req_min = current_req_min / multiplier
+                # Use float multiplier, keep REQ_MIN as integer via rounding
+                new_req_min = max(1, int(round(current_req_min / multiplier)))
                 return 1, new_req_min, None, None, None, None, retry_count_stage1, highest_true, lowest_false
             else:
                 # Have TRUE and confirmed FALSE → transition to stage 2
