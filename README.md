@@ -15,8 +15,17 @@ Notes:
 - `REQ_MIN` changes automatically per iteration based on `REQ_MIN_INCREASE_MULTIPLIER` (stage 1) and binary search (stage 2); configuration is read from [.env](.env) by [experiment_automation.py](experiment_automation.py).
 
 # How to run
+Once everything is set up, run the following command:
 
-Once everything is set up, run experiment_automation.py. experiment_automation.slurm creates a SLURM job that executes the experiment in the background.
+```bash
+python experiment_automation.py
+```
+
+Alternatively, if SLURM is active and running in the network, create a SLURM job to execute the experiment in the background:
+
+```bash
+sbatch experiment_automation.slurm
+```
 
 # Results
 
