@@ -12,19 +12,43 @@ from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILE
 # Configuration loader: read values from .env without modifying the file.
 #
 def _parse_tokens_list(value):
-    """Parse TOKENS_LIST env value: "a:b,a:b,..." -> [[a,b], ...]."""
+    """Parse TOKENS_LIST into input/output intervals.
+
+    Supported formats (comma-separated):
+    - "in:out"                -> [[in_min,in_max,out_min,out_max]] with in_min=in_max=in, out_min=out_max=out
+    - "inMin-inMax:out"       -> [[inMin,inMax,out,out]]
+    - "in:outMin-outMax"      -> [[in,in,outMin,outMax]]
+    - "inMin-inMax:outMin-outMax" -> [[inMin,inMax,outMin,outMax]]
+
+    Malformed entries are skipped. Whitespace is ignored.
+    """
     tokens = []
     if not value:
         return tokens
     for item in value.split(','):
-        item = item.strip()
-        if not item:
+        s = item.strip()
+        if not s:
             continue
+        if ':' not in s:
+            continue
+        in_part, out_part = s.split(':', 1)
+        in_part = in_part.strip()
+        out_part = out_part.strip()
         try:
-            a_str, b_str = item.split(':', 1)
-            tokens.append([int(a_str), int(b_str)])
+            if '-' in in_part:
+                in_min_str, in_max_str = in_part.split('-', 1)
+                in_min = int(in_min_str.strip())
+                in_max = int(in_max_str.strip())
+            else:
+                in_min = in_max = int(in_part)
+            if '-' in out_part:
+                out_min_str, out_max_str = out_part.split('-', 1)
+                out_min = int(out_min_str.strip())
+                out_max = int(out_max_str.strip())
+            else:
+                out_min = out_max = int(out_part)
+            tokens.append([in_min, in_max, out_min, out_max])
         except ValueError:
-            # Skip malformed entries
             continue
     return tokens
 
@@ -102,16 +126,29 @@ def load_env_config():
 
 CONFIG = load_env_config()
 
-def set_process_env_for_run(req_min_value, input_tokens=None, output_tokens=None):
-    """Set environment variables in-process for a run without modifying .env."""
+def set_process_env_for_run(req_min_value, input_interval=None, output_interval=None):
+    """Set environment variables in-process for a run without modifying .env.
+
+    input_interval/output_interval can be:
+    - a single int, or
+    - a tuple/list (min, max)
+    """
     if req_min_value is not None:
         os.environ['REQ_MIN'] = str(req_min_value)
-    if input_tokens is not None:
-        os.environ['MIN_INPUT_TOKENS'] = str(input_tokens)
-        os.environ['MAX_INPUT_TOKENS'] = str(input_tokens)
-    if output_tokens is not None:
-        os.environ['MIN_OUTPUT_TOKENS'] = str(output_tokens)
-        os.environ['MAX_OUTPUT_TOKENS'] = str(output_tokens)
+    if input_interval is not None:
+        if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
+            os.environ['MIN_INPUT_TOKENS'] = str(input_interval[0])
+            os.environ['MAX_INPUT_TOKENS'] = str(input_interval[1])
+        else:
+            os.environ['MIN_INPUT_TOKENS'] = str(input_interval)
+            os.environ['MAX_INPUT_TOKENS'] = str(input_interval)
+    if output_interval is not None:
+        if isinstance(output_interval, (list, tuple)) and len(output_interval) >= 2:
+            os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval[0])
+            os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval[1])
+        else:
+            os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval)
+            os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval)
 
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
@@ -302,7 +339,20 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     print(f"Stored configuration - MODEL: {model}, GPUS: {gpus}, CPUS: {cpus}, NODE: {node}")
     
     # Create parent directory for this token pair
-    parent_dir = f"{tokens[0]}_{tokens[1]}"
+    # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
+    if len(tokens) >= 4:
+        in_min, in_max, out_min, out_max = tokens[0], tokens[1], tokens[2], tokens[3]
+        parent_dir = f"{in_min}-{in_max}_{out_min}-{out_max}"
+        input_interval = (in_min, in_max)
+        output_interval = (out_min, out_max)
+        interval_strs = (f"{in_min}-{in_max}", f"{out_min}-{out_max}")
+    else:
+        in_min = in_max = tokens[0]
+        out_min = out_max = tokens[1]
+        parent_dir = f"{tokens[0]}_{tokens[1]}"
+        input_interval = tokens[0]
+        output_interval = tokens[1]
+        interval_strs = (str(tokens[0]), str(tokens[1]))
     os.makedirs(parent_dir, exist_ok=True)
     print(f"Created parent directory: {parent_dir}")
     
@@ -325,7 +375,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     iteration = 0
 
     # Set process env for the initial request generation without modifying .env
-    set_process_env_for_run(req_min, input_tokens=tokens[0], output_tokens=tokens[1])
+    set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
     requests_dir = Path('requests')
     os.chdir(requests_dir)
     sample_file = Path('sample_requests.json')
@@ -400,7 +450,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
 
     while iteration < max_iterations:
         iteration += 1
-        print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}, REQ_MIN={req_min} ---")
+        print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={interval_strs[0]}, OUTPUT_TOKENS={interval_strs[1]}, REQ_MIN={req_min} ---")
         
         # Step 2: Update in-process environment for this iteration (no .env writes)
         set_process_env_for_run(req_min)
@@ -460,7 +510,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             store_args = [
                 "python", "-u", "store_results.py",
                 str(model), str(gpus), str(cpus), str(node), str(stage), str(parent_dir),
-                str(tokens[0]), str(tokens[1]), str(req_min_used), str(evaluation_flag), str(median_str),
+                str(interval_strs[0]), str(interval_strs[1]), str(req_min_used), str(evaluation_flag), str(median_str),
                 str(prompt_token_count if prompt_token_count is not None else ''),
                 str(prompt_text if prompt_text is not None else '')
             ]

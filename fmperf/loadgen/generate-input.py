@@ -18,28 +18,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-code = os.getenv("CODE", "false").lower() != "false"
-
-if code:
-    import fmperf
-
-    tmp = fmperf.__file__.split("/")[:-1]
-    tmp.append("Cluster.py")
-    seed_text_file = "/".join(tmp)
-else:
-    seed_text_file = impresources.files(fmperf.data) / "ai.txt"
-
-with open(seed_text_file, "r") as f:
-    text = f.read()
+# Prompts will be loaded from a JSONL dataset instead of generated seed text
+DEFAULT_PROMPTS_FILE = os.path.join(os.getcwd(), "oasst_roots_en_max1000_tokens.jsonl")
+PROMPTS_FILE = os.environ.get("PROMPTS_FILE", DEFAULT_PROMPTS_FILE)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--import-text", help="json file name of input texts")
 parser.add_argument(
     "--from-model",
     help="generate requests according to requests model",
     action="store_true",
 )
+parser.add_argument("--prompts-file", help="Path to JSONL prompts file (overrides PROMPTS_FILE)")
 args = parser.parse_args()
+
+if args.prompts_file:
+    PROMPTS_FILE = args.prompts_file
 
 
 def get_streaming_response(response: requests.Response, request_timeout: float, ttft_timeout: float, tpot_timeout: float):
@@ -106,24 +99,49 @@ def get_streaming_response(response: requests.Response, request_timeout: float, 
                 raise RuntimeError("No usage data in server response")
 
 
-def get_text():
-    if args.import_text:
-        texts = json.load(open(args.import_text, "r"))
-        n = len(texts)
-        i = 0
-        while True:
-            t = texts[i]
-            i = (i + 1) % n
-            yield t
-    else:
-        while True:
-            yield text
+def _extract_text_and_tokens(obj: dict):
+    """Extract prompt text and token count from a JSON object if present."""
+    text_keys = ["text", "prompt", "content", "message", "input"]
+    token_keys = ["n_tokens", "tokens", "input_token_count", "token_count"]
+    prompt_text = None
+    for k in text_keys:
+        if k in obj and isinstance(obj[k], str) and obj[k].strip():
+            prompt_text = obj[k].strip()
+            break
+    prompt_tokens = None
+    for k in token_keys:
+        if k in obj:
+            try:
+                prompt_tokens = int(obj[k])
+                break
+            except Exception:
+                continue
+    return prompt_text, prompt_tokens
+
+def _load_prompts_from_jsonl(path: str):
+    prompts = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                txt, toks = _extract_text_and_tokens(obj)
+                if txt is None:
+                    continue
+                prompts.append({"text": txt, "tokens": toks})
+    except FileNotFoundError:
+        print(f"Warning: prompts file not found: {path}")
+    except Exception as e:
+        print(f"Warning: failed to load prompts from {path}: {e}")
+    return prompts
 
 
-text_generator = get_text()
-
-
-def generate_vllm_request(config, url):
+def generate_vllm_request(config, url, source_text):
     # Remove http:// prefix if present to avoid duplication
     url_no_prefix = url.replace("http://", "")
 
@@ -138,8 +156,6 @@ def generate_vllm_request(config, url):
         tokenizer_kwargs["token"] = hf_token
 
     tokenizer = AutoTokenizer.from_pretrained(model, **tokenizer_kwargs)
-
-    source_text = next(text_generator)
     prompt_ids = tokenizer(source_text).input_ids[-config["in_tokens"] :]
 
     request = {
@@ -195,13 +211,13 @@ def generate_vllm_request(config, url):
     try:
         prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
     except Exception:
-        # Fallback: if decode fails, store token IDs string
-        prompt_text = f"<token_ids:{len(prompt_ids)}>"
+        # Fallback: return original text if decode fails
+        prompt_text = source_text
 
     return request, expected, prompt_text, len(prompt_ids)
 
 
-def generate_tgis_request(config, url):
+def generate_tgis_request(config, url, source_text):
     """
     Generate (streaming) gRPC request and expected response
     """
@@ -230,7 +246,7 @@ def generate_tgis_request(config, url):
         "model_id": "null",
         "params": params,
         "request": {
-            "text": next(text_generator),
+            "text": source_text,
         },
     }
 
@@ -317,7 +333,7 @@ if os.path.isfile(os.path.join(REQUESTS_DIR, filename)) and not overwrite:
 
 
 print(">> ---------------------------------")
-print(">> Generating heterogeneous requests")
+print(">> Generating requests from JSONL prompts")
 print(">> ---------------------------------")
 print(">> sample_size    = %d" % (sample_size))
 
@@ -331,6 +347,7 @@ if not args.from_model:
 print(">> filename       = %s" % (filename))
 print(">> target         = %s" % (target))
 print(">> url            = %s" % (url))
+print(">> prompts_file   = %s" % (PROMPTS_FILE))
 
 
 cases = []
@@ -355,6 +372,20 @@ if args.from_model:
 attempts_per_sample = int(os.environ.get("MAX_GENERATE_ATTEMPTS", "3"))
 retry_backoff = float(os.environ.get("RETRY_BACKOFF_SECONDS", "1.0"))
 
+prompts_pool = _load_prompts_from_jsonl(PROMPTS_FILE)
+filtered_prompts = []
+if not args.from_model:
+    for p in prompts_pool:
+        toks = p.get("tokens")
+        if toks is None or (min_in_tokens <= toks <= max_in_tokens):
+            filtered_prompts.append(p)
+else:
+    filtered_prompts = prompts_pool[:]
+
+if len(filtered_prompts) == 0:
+    print("Warning: no prompts available after filtering; using full pool")
+    filtered_prompts = prompts_pool[:]
+
 for sample_idx in range(sample_size):
     if args.from_model:
         sample = samples.iloc[sample_idx]
@@ -367,11 +398,20 @@ for sample_idx in range(sample_size):
             "top_p": sample["params.top_p"],
         }
     else:
+        # Choose a prompt from filtered pool
+        if len(filtered_prompts) == 0:
+            raise RuntimeError("No prompts available to sample")
+        p = filtered_prompts[np.random.randint(low=0, high=len(filtered_prompts))]
+        source_text = p["text"]
+        in_tok = p.get("tokens")
+        if in_tok is None:
+            in_tok = min_in_tokens
+        # Ensure input token budget stays within configured bounds
+        in_tok = max(min_in_tokens, min(int(in_tok), max_in_tokens))
+
         config = {
-            "in_tokens": np.random.randint(low=min_in_tokens, high=max_in_tokens + 1),
-            "out_tokens": np.random.randint(
-                low=min_out_tokens, high=max_out_tokens + 1
-            ),
+            "in_tokens": in_tok,
+            "out_tokens": int(np.random.randint(low=min_out_tokens, high=max_out_tokens + 1)),
             "is_greedy": np.random.uniform() < frac_greedy,
         }
 
@@ -383,11 +423,11 @@ for sample_idx in range(sample_size):
     for attempt in range(1, attempts_per_sample + 1):
         try:
             if target == "tgis":
-                req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url)
+                req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
                 case["request"], case["expected"] = req, expected
                 case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
             elif target == "vllm":  # StackSpec will also use this
-                req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url)
+                req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
                 case["request"], case["expected"] = req, expected
                 case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
             else:
