@@ -81,7 +81,8 @@ def load_env_config():
     - TOKENS_LIST: comma-separated pairs like "32:32,32:64"
     - REQ_MIN_START: comma-separated integers (per-token-combo initial REQ_MIN)
     - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
-    - STOP_THRESHOLD: float (used in end condition)
+        - STOP_THRESHOLD: float (relative stop threshold used as
+            M - m <= M * STOP_THRESHOLD in stage 2)
     """
     env_path = Path('.env')
     config = {
@@ -235,13 +236,24 @@ def start_stage_1():
     return 1
 
 def end_experiment(stage, M, m, M_0, m_0, evaluation):
-    """Check termination condition for stage 2"""
+    """Check termination condition for stage 2 using a relative threshold based on M.
+
+    Stops when the gap (M - m) is less than or equal to M * STOP_THRESHOLD.
+    Falls back to absolute STOP_THRESHOLD if M or m are not numbers.
+    """
     stop_threshold = CONFIG.get('STOP_THRESHOLD', 0.5)
-    if stage == 2 and (M - m) <= stop_threshold:
-        if evaluation:
-            return True, "REQ_MIN", None  # Return REQ_MIN as result
-        else:
-            return True, "m", m  # Return m as result
+    if stage == 2 and (M is not None) and (m is not None):
+        try:
+            relative_threshold = float(M) * float(stop_threshold)
+        except Exception:
+            # Fallback: treat threshold as absolute if casting fails
+            relative_threshold = float(stop_threshold)
+
+        if (M - m) <= relative_threshold:
+            if evaluation:
+                return True, "REQ_MIN", None  # Return REQ_MIN as result
+            else:
+                return True, "m", m  # Return m as result
     return False, None, None
 
 def update_stage_1(evaluation, current_req_min, retry_count_stage1, highest_true, lowest_false):
