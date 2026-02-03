@@ -420,7 +420,11 @@ def _write_prompts_csv(full_dir_path: str) -> None:
 
     Reads the requests JSON produced by generate-input (cases with
     'prompt_text' and optional 'prompt_token_count') and writes a CSV
-    containing each unique prompt once.
+    containing each unique prompt aggregated with occurrences.
+
+    Occurrences reflect how many times the prompt appeared in the
+    requests payload (i.e., how many requests were sent using that
+    prompt), independent of response success.
     """
     try:
         req_path = _find_requests_file()
@@ -460,66 +464,27 @@ def _write_prompts_csv(full_dir_path: str) -> None:
             print("Warning: no prompts found in requests payload; skipping prompts.csv generation")
             return
 
-        # Map request_idx -> worker_idx from results.json (using response_idx==0 records)
-        def _safe_int(v) -> Optional[int]:
-            try:
-                if isinstance(v, bool):
-                    return int(v)
-                if isinstance(v, (int, float)):
-                    return int(v)
-                if isinstance(v, str) and v.strip():
-                    return int(float(v))
-            except Exception:
-                return None
-            return None
-
-        worker_by_req: dict[int, int] = {}
-        results_path = Path("results.json")
-        if results_path.exists():
-            try:
-                rpayload = json.loads(results_path.read_text(encoding="utf-8"))
-                ritems = rpayload.get("results") if isinstance(rpayload, dict) else rpayload
-                if isinstance(ritems, list):
-                    for ev in ritems:
-                        if not isinstance(ev, dict):
-                            continue
-                        rsi = _safe_int(ev.get("response_idx"))
-                        if rsi != 0:
-                            continue
-                        rid = _safe_int(ev.get("request_idx"))
-                        wid = _safe_int(ev.get("worker_idx"))
-                        if rid is not None and wid is not None and rid not in worker_by_req:
-                            worker_by_req[rid] = wid
-            except Exception as e:
-                print(f"Warning: unable to read worker assignments from results.json: {e}")
-
-        # Aggregate by prompt text: count occurrences and collect worker ids
+        # Aggregate by prompt text: count occurrences
         from collections import OrderedDict
         agg: "OrderedDict[str, dict]" = OrderedDict()
         for idx, (txt, tok) in enumerate(prompts_by_index):
             if txt not in agg:
-                agg[txt] = {"count": 0, "token_count": tok, "workers": set()}
+                agg[txt] = {"count": 0, "token_count": tok}
             entry = agg[txt]
             entry["count"] += 1
             if entry["token_count"] in (None, "") and tok not in (None, ""):
                 entry["token_count"] = tok
-            wid = worker_by_req.get(idx)
-            if wid is not None:
-                entry["workers"].add(wid)
 
         out_path = os.path.join(full_dir_path, "prompts.csv")
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["PROMPT_TEXT", "PROMPT_TOKEN_COUNT", "OCCURRENCES", "WORKER_IDS"])
+            w.writerow(["PROMPT_TEXT", "PROMPT_TOKEN_COUNT", "OCCURRENCES"])
             for txt, entry in agg.items():
                 safe_txt = txt.replace("\n", " ").strip()
-                workers_list = sorted(entry["workers"]) if entry["workers"] else []
-                workers_str = ",".join(str(w) for w in workers_list)
                 w.writerow([
                     safe_txt,
                     "" if entry["token_count"] in (None, "") else str(entry["token_count"]),
                     str(entry["count"]),
-                    workers_str,
                 ])
         print(f"Created prompts.csv in {full_dir_path} with {len(agg)} unique prompts")
     except Exception as e:

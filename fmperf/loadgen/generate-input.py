@@ -300,9 +300,6 @@ def generate_tgis_request(config, url, source_text):
 
 np.random.seed(42)
 
-# Get sample size
-sample_size = int(os.environ["SAMPLE_SIZE"])
-
 if not args.from_model:
     # Get input size distribution info
     min_in_tokens = int(os.environ["MIN_INPUT_TOKENS"])
@@ -335,7 +332,10 @@ if os.path.isfile(os.path.join(REQUESTS_DIR, filename)) and not overwrite:
 print(">> ---------------------------------")
 print(">> Generating requests from JSONL prompts")
 print(">> ---------------------------------")
-print(">> sample_size    = %d" % (sample_size))
+if args.from_model:
+    # Only relevant when sampling from the requests model
+    sample_size = int(os.environ.get("SAMPLE_SIZE", "0"))
+    print(">> sample_size    = %d" % (sample_size))
 
 if not args.from_model:
     print(">> min_in_tokens  = %d" % (min_in_tokens))
@@ -365,8 +365,8 @@ if args.from_model:
             return super().find_class(module, name)
 
     requests_model = CustomUnpickler(open(requests_model_file, "rb")).load()
-
-    samples = requests_model.sample(sample_size)
+    # When using the model-based generator, keep sample_size semantics
+    samples = requests_model.sample(sample_size) if sample_size > 0 else requests_model.sample(0)
     print(samples)
 
 attempts_per_sample = int(os.environ.get("MAX_GENERATE_ATTEMPTS", "3"))
@@ -386,8 +386,8 @@ if len(filtered_prompts) == 0:
     print("Warning: no prompts available after filtering; using full pool")
     filtered_prompts = prompts_pool[:]
 
-for sample_idx in range(sample_size):
-    if args.from_model:
+if args.from_model:
+    for sample_idx in range(sample_size):
         sample = samples.iloc[sample_idx]
         config = {
             "in_tokens": sample["input_token_count"],
@@ -397,11 +397,45 @@ for sample_idx in range(sample_size):
             "top_k": sample["params.top_k"],
             "top_p": sample["params.top_p"],
         }
-    else:
-        # Choose a prompt from filtered pool
-        if len(filtered_prompts) == 0:
-            raise RuntimeError("No prompts available to sample")
-        p = filtered_prompts[np.random.randint(low=0, high=len(filtered_prompts))]
+        case = {
+            "config": config,
+        }
+
+        success = False
+        # Use the same source_text for model mode; choose a placeholder text
+        source_text = ""
+        for attempt in range(1, attempts_per_sample + 1):
+            try:
+                if target == "tgis":
+                    req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
+                    case["request"], case["expected"] = req, expected
+                    case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                elif target == "vllm":  # StackSpec will also use this
+                    req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
+                    case["request"], case["expected"] = req, expected
+                    case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                else:
+                    raise ValueError(f"Invalid target: {target}")
+
+                # verify expected token count to avoid downstream mismatches
+                if len(case["expected"]) != config["out_tokens"]:
+                    raise RuntimeError(
+                        f"Expected {config['out_tokens']} tokens, got {len(case['expected'])}"
+                    )
+
+                print(json.dumps(case, indent=4))
+                cases.append(case)
+                success = True
+                break
+            except Exception:
+                print(f"[sample {sample_idx}] attempt {attempt} failed:\n{traceback.format_exc()}")
+                time.sleep(retry_backoff)
+
+        if not success:
+            print(f"[sample {sample_idx}] giving up after {attempts_per_sample} attempts; skipping sample")
+else:
+    # Iterate over ALL filtered prompts; no sample size limit
+    for sample_idx, p in enumerate(filtered_prompts):
         source_text = p["text"]
         in_tok = p.get("tokens")
         if in_tok is None:
@@ -415,40 +449,40 @@ for sample_idx in range(sample_size):
             "is_greedy": np.random.uniform() < frac_greedy,
         }
 
-    case = {
-        "config": config,
-    }
+        case = {
+            "config": config,
+        }
 
-    success = False
-    for attempt in range(1, attempts_per_sample + 1):
-        try:
-            if target == "tgis":
-                req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
-                case["request"], case["expected"] = req, expected
-                case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
-            elif target == "vllm":  # StackSpec will also use this
-                req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
-                case["request"], case["expected"] = req, expected
-                case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
-            else:
-                raise ValueError(f"Invalid target: {target}")
+        success = False
+        for attempt in range(1, attempts_per_sample + 1):
+            try:
+                if target == "tgis":
+                    req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
+                    case["request"], case["expected"] = req, expected
+                    case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                elif target == "vllm":  # StackSpec will also use this
+                    req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
+                    case["request"], case["expected"] = req, expected
+                    case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                else:
+                    raise ValueError(f"Invalid target: {target}")
 
-            # verify expected token count to avoid downstream mismatches
-            if len(case["expected"]) != config["out_tokens"]:
-                raise RuntimeError(
-                    f"Expected {config['out_tokens']} tokens, got {len(case['expected'])}"
-                )
+                # verify expected token count to avoid downstream mismatches
+                if len(case["expected"]) != config["out_tokens"]:
+                    raise RuntimeError(
+                        f"Expected {config['out_tokens']} tokens, got {len(case['expected'])}"
+                    )
 
-            print(json.dumps(case, indent=4))
-            cases.append(case)
-            success = True
-            break
-        except Exception:
-            print(f"[sample {sample_idx}] attempt {attempt} failed:\n{traceback.format_exc()}")
-            time.sleep(retry_backoff)
+                print(json.dumps(case, indent=4))
+                cases.append(case)
+                success = True
+                break
+            except Exception:
+                print(f"[prompt {sample_idx}] attempt {attempt} failed:\n{traceback.format_exc()}")
+                time.sleep(retry_backoff)
 
-    if not success:
-        print(f"[sample {sample_idx}] giving up after {attempts_per_sample} attempts; skipping sample")
+        if not success:
+            print(f"[prompt {sample_idx}] giving up after {attempts_per_sample} attempts; skipping sample")
 
 
 if len(cases) > 0:
