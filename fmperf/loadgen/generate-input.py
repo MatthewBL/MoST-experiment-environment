@@ -312,8 +312,16 @@ if not args.from_model:
     # Get greedy
     frac_greedy = float(os.environ["FRAC_GREEDY"])
 
-# output file
-filename = os.environ["REQUESTS_FILENAME"]
+# output file: always append min-max input interval to base name when not using model mode
+base_filename = os.environ.get("REQUESTS_FILENAME", "requests.json")
+if not args.from_model:
+    in_str = f"{min_in_tokens}-{max_in_tokens}"
+    name, ext = os.path.splitext(base_filename)
+    if not ext:
+        ext = ".json"
+    filename = f"{name}_{in_str}{ext}"
+else:
+    filename = base_filename
 
 # target
 target = os.environ["TARGET"]

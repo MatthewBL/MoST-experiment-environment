@@ -151,6 +151,18 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval)
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval)
 
+    # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
+    if input_interval is not None:
+        if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
+            in_min, in_max = input_interval[0], input_interval[1]
+        else:
+            in_min = in_max = int(input_interval)
+        base_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+        name, ext = os.path.splitext(base_filename)
+        if not ext:
+            ext = '.json'
+        os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
+
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
     print(f"Running: {command}")
@@ -394,7 +406,13 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     if sample_file.exists():
         sample_file.unlink()
     os.chdir('..')
-    run_command("python -u -m fmperf.loadgen.generate-input", wait=True)
+    # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
+    req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+    req_path = os.path.join(REQUESTS_DIR, req_filename)
+    if os.path.isfile(req_path):
+        print(f"Found existing workload: {req_path}. Skipping generation.")
+    else:
+        run_command("python -u -m fmperf.loadgen.generate-input", wait=True)
     
     def _get_prompt_info():
         """Read prompt text and token count from generated requests file."""
