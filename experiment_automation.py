@@ -151,18 +151,6 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval)
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval)
 
-    # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
-    if input_interval is not None:
-        if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
-            in_min, in_max = input_interval[0], input_interval[1]
-        else:
-            in_min = in_max = int(input_interval)
-        base_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-        name, ext = os.path.splitext(base_filename)
-        if not ext:
-            ext = '.json'
-        os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
-
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
     print(f"Running: {command}")
