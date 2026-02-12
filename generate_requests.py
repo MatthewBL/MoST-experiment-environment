@@ -48,7 +48,11 @@ def main() -> None:
 
     requests_dir = Path(REQUESTS_DIR)
     requests_dir.mkdir(parents=True, exist_ok=True)
-    target_path = args.output if args.output is not None else requests_dir / REQUESTS_FILENAME
+    base_name = Path(REQUESTS_FILENAME)
+    name_root = base_name.stem
+    suffix = base_name.suffix or ".json"
+    default_output = requests_dir / f"{name_root}_{args.min_input}-{args.max_input}{suffix}"
+    target_path = args.output if args.output is not None else default_output
 
     if target_path.exists() and not args.overwrite:
         print(f"Existing workload found at {target_path}. Use --overwrite to regenerate.")

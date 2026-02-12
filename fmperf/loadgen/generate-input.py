@@ -93,7 +93,9 @@ def main() -> None:
     output_path = args.output
     if output_path is None:
         filename = os.environ.get("REQUESTS_FILENAME", REQUESTS_FILENAME)
-        output_path = Path(REQUESTS_DIR) / filename
+        name_root = Path(filename).stem
+        suffix = Path(filename).suffix or ".json"
+        output_path = Path(REQUESTS_DIR) / f"{name_root}_{min_tokens}-{max_tokens}{suffix}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     prompts = list(_load_jsonl(prompts_file))
