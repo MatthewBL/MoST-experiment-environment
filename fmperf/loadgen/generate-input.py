@@ -193,7 +193,7 @@ def generate_vllm_request(config, url, source_text):
         tokenizer_kwargs["token"] = hf_token
 
     tokenizer = AutoTokenizer.from_pretrained(model, **tokenizer_kwargs)
-    prompt_ids = tokenizer(source_text).input_ids[-config["in_tokens"] :]
+    prompt_ids = tokenizer(source_text).input_ids
 
     request = {
         "model": model,
@@ -396,19 +396,8 @@ attempts_per_sample = int(os.environ.get("MAX_GENERATE_ATTEMPTS", "3"))
 retry_backoff = float(os.environ.get("RETRY_BACKOFF_SECONDS", "1.0"))
 
 prompts_pool = _load_prompts_from_jsonl(PROMPTS_FILE)
-filtered_prompts = []
-if not args.from_model:
-    for p in prompts_pool:
-        toks = p.get("tokens")
-        if toks is None:
-            continue
-        if min_in_tokens <= int(toks) <= max_in_tokens:
-            filtered_prompts.append(p)
-else:
-    filtered_prompts = prompts_pool[:]
-
-if len(filtered_prompts) == 0:
-    print("Warning: no prompts available after filtering; aborting generation")
+if not prompts_pool and not args.from_model:
+    print("Warning: no prompts available in prompts file; aborting generation")
     sys.exit(1)
 
 if args.from_model:
@@ -441,6 +430,8 @@ if args.from_model:
                 else:
                     raise ValueError(f"Invalid target: {target}")
 
+                case["config"]["in_tokens"] = prompt_token_count
+
                 if len(case["expected"]) != config["out_tokens"]:
                     raise RuntimeError(
                         f"Expected {config['out_tokens']} tokens, got {len(case['expected'])}"
@@ -457,13 +448,14 @@ if args.from_model:
         if not success:
             print(f"[sample {sample_idx}] giving up after {attempts_per_sample} attempts; skipping sample")
 else:
-    for sample_idx, p in enumerate(filtered_prompts):
+    for sample_idx, p in enumerate(prompts_pool):
         source_text = p["text"]
         in_tok = p.get("tokens")
         if in_tok is None:
-            continue
+            raise ValueError(
+                "Prompt is missing a token count; ensure generate_requests.py filters only prompts with gpt2_token_count"
+            )
         in_tok = int(in_tok)
-        in_tok = max(min_in_tokens, min(in_tok, max_in_tokens))
 
         config = {
             "in_tokens": in_tok,
@@ -488,6 +480,8 @@ else:
                     case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
                 else:
                     raise ValueError(f"Invalid target: {target}")
+
+                case["config"]["in_tokens"] = prompt_token_count
 
                 if len(case["expected"]) != config["out_tokens"]:
                     raise RuntimeError(
