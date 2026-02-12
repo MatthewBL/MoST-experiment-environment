@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import re
 import os
 import json
 import subprocess
@@ -127,6 +128,25 @@ def load_env_config():
 
 CONFIG = load_env_config()
 
+_TOKEN_SUFFIX_RE = re.compile(r"^(.*)_([0-9]+)-([0-9]+)$")
+
+def _strip_token_suffix(filename):
+    """Remove trailing _MIN-MAX suffix from filename if present."""
+    name, ext = os.path.splitext(filename)
+    match = _TOKEN_SUFFIX_RE.match(name)
+    if match:
+        return f"{match.group(1)}{ext}"
+    return filename
+
+def _get_requests_filename_base():
+    base = os.environ.get('REQUESTS_FILENAME_BASE')
+    if base:
+        return base
+    current = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+    normalized = _strip_token_suffix(current)
+    os.environ['REQUESTS_FILENAME_BASE'] = normalized
+    return normalized
+
 def set_process_env_for_run(req_min_value, input_interval=None, output_interval=None):
     """Set environment variables in-process for a run without modifying .env.
 
@@ -154,10 +174,10 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
     # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
     if input_interval is not None:
         if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
-            in_min, in_max = input_interval[0], input_interval[1]
+            in_min, in_max = int(input_interval[0]), int(input_interval[1])
         else:
             in_min = in_max = int(input_interval)
-        base_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+        base_filename = _get_requests_filename_base()
         name, ext = os.path.splitext(base_filename)
         if not ext:
             ext = '.json'
