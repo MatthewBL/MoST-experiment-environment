@@ -1,10 +1,10 @@
 import argparse
-import os
 import subprocess
 from pathlib import Path
 
-from experiment_automation import set_process_env_for_run
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME
+
+DEFAULT_PROMPTS = Path(__file__).resolve().with_name("oasst_roots_en_max1000_tokens.jsonl")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -14,10 +14,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("min_input", type=int, help="Minimum input tokens")
     parser.add_argument("max_input", type=int, help="Maximum input tokens")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite existing workload file")
-    parser.add_argument("--min-output", type=int, default=None, help="Minimum output tokens (defaults to min_input)")
-    parser.add_argument("--max-output", type=int, default=None, help="Maximum output tokens (defaults to max_input)")
-    parser.add_argument("--req-min", type=int, default=1, help="REQ_MIN value to store in the environment")
-    parser.add_argument("--prompts-file", help="Optional prompts JSONL file to pass to generate-input")
+    parser.add_argument(
+        "--prompts-file",
+        type=Path,
+        default=DEFAULT_PROMPTS,
+        help="Path to the prompts JSONL dataset (defaults to oasst_roots_en_max1000_tokens.jsonl)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional custom output path for the generated requests JSON file",
+    )
     return parser
 
 
@@ -33,31 +41,33 @@ def main() -> None:
     args = parser.parse_args()
 
     _validate_ranges(args.min_input, args.max_input, "Input")
-    min_output = args.min_output if args.min_output is not None else args.min_input
-    max_output = args.max_output if args.max_output is not None else args.max_input
-    _validate_ranges(min_output, max_output, "Output")
 
-    if args.prompts_file:
-        os.environ["PROMPTS_FILE"] = args.prompts_file
-
-    set_process_env_for_run(
-        args.req_min,
-        input_interval=(args.min_input, args.max_input),
-        output_interval=(min_output, max_output),
-    )
+    prompts_path = args.prompts_file
+    if not prompts_path.exists():
+        raise FileNotFoundError(f"Prompts file not found: {prompts_path}")
 
     requests_dir = Path(REQUESTS_DIR)
     requests_dir.mkdir(parents=True, exist_ok=True)
-    target_name = os.environ.get("REQUESTS_FILENAME", REQUESTS_FILENAME)
-    target_path = requests_dir / target_name
+    target_path = args.output if args.output is not None else requests_dir / REQUESTS_FILENAME
 
     if target_path.exists() and not args.overwrite:
         print(f"Existing workload found at {target_path}. Use --overwrite to regenerate.")
         return
 
-    os.environ["OVERWRITE"] = "true" if args.overwrite else "false"
-
-    command = ["python", "-u", "-m", "fmperf.loadgen.generate-input"]
+    command = [
+        "python",
+        "-u",
+        "-m",
+        "fmperf.loadgen.generate-input",
+        "--min-input",
+        str(args.min_input),
+        "--max-input",
+        str(args.max_input),
+        "--prompts-file",
+        str(prompts_path),
+        "--output",
+        str(target_path),
+    ]
     result = subprocess.run(command)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
