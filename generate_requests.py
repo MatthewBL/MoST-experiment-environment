@@ -21,6 +21,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the prompts JSONL dataset (defaults to oasst_roots_en_max1000_tokens.jsonl)",
     )
     parser.add_argument(
+        "--min-output",
+        type=int,
+        default=None,
+        help="Minimum generated tokens (defaults to the minimum input tokens if omitted)",
+    )
+    parser.add_argument(
+        "--max-output",
+        type=int,
+        default=None,
+        help="Maximum generated tokens (defaults to the maximum input tokens if omitted)",
+    )
+    parser.add_argument(
+        "--frac-greedy",
+        type=float,
+        default=None,
+        help="Optional override for the FRAC_GREEDY probability",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -72,6 +90,12 @@ def main() -> None:
         "--output",
         str(target_path),
     ]
+    if args.min_output is not None:
+        command.extend(["--min-output", str(args.min_output)])
+    if args.max_output is not None:
+        command.extend(["--max-output", str(args.max_output)])
+    if args.frac_greedy is not None:
+        command.extend(["--frac-greedy", str(args.frac_greedy)])
     result = subprocess.run(command)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
