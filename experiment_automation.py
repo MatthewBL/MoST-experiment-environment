@@ -9,6 +9,8 @@ import subprocess
 import time
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
 
+REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
+
 #
 # Configuration loader: read values from .env without modifying the file.
 #
@@ -428,11 +430,24 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     os.chdir('..')
     # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
     req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-    req_path = os.path.join(REQUESTS_DIR, req_filename)
-    if os.path.isfile(req_path):
-        print(f"Found existing workload: {req_path}. Skipping generation.")
+    req_path = Path(REQUESTS_DIR) / req_filename
+    if req_path.is_file():
+        print(f"Found existing workload: {req_path}. Using cached file.")
     else:
-        run_command("python -u -m fmperf.loadgen.generate-input", wait=True)
+        prompts_path = REQUESTS_PROMPTS_FILE.resolve()
+        if not prompts_path.exists():
+            raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
+        command = (
+            f'python -u generate_requests.py {in_min} {in_max} '
+            f'--prompts-file "{prompts_path}"'
+        )
+        run_command(command, wait=True)
+        if req_path.is_file():
+            print(f"Generated workload: {req_path}")
+        else:
+            raise FileNotFoundError(
+                f"Workload generation failed; expected file not found: {req_path}"
+            )
     
     def _get_prompt_info():
         """Read prompt text and token count from generated requests file."""
