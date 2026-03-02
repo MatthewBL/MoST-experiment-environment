@@ -93,6 +93,8 @@ def load_env_config():
         'REQ_MIN_START': [1],
         'REQ_MIN_INCREASE_MULTIPLIER': 2.0,
         'STOP_THRESHOLD': 0.5,
+        'EXPERIMENT_TYPE': 'MST',
+        'DURATION': None,
     }
 
     if env_path.exists():
@@ -125,10 +127,65 @@ def load_env_config():
                         config['STOP_THRESHOLD'] = float(val)
                     except ValueError:
                         pass
+                elif key == 'EXPERIMENT_TYPE':
+                    config['EXPERIMENT_TYPE'] = val.strip() or 'MST'
+                elif key == 'DURATION':
+                    config['DURATION'] = val.strip()
 
     return config
 
 CONFIG = load_env_config()
+
+_DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>[smhdSMHD]?)$")
+MIT_PLATEAU_REL_TOL = float(os.environ.get('MIT_PLATEAU_REL_TOL', '0.01'))
+MIT_PLATEAU_ABS_TOL = float(os.environ.get('MIT_PLATEAU_ABS_TOL', '0.5'))
+
+
+def _normalize_experiment_type(value):
+    if not value:
+        return 'MST'
+    return value.strip().upper()
+
+
+def get_experiment_type():
+    """Return the experiment type from env or .env config."""
+    env_val = os.environ.get('EXPERIMENT_TYPE')
+    if env_val:
+        return _normalize_experiment_type(env_val)
+    return _normalize_experiment_type(CONFIG.get('EXPERIMENT_TYPE', 'MST'))
+
+
+def _parse_duration_seconds(value):
+    """Parse duration strings like '1800s', '30m', '2h' into seconds."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    match = _DURATION_PATTERN.match(s)
+    if not match:
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    number = float(match.group('value'))
+    unit = match.group('unit').lower()
+    if unit == 'm':
+        number *= 60
+    elif unit == 'h':
+        number *= 3600
+    elif unit == 'd':
+        number *= 86400
+    return number
+
+
+def _get_duration_seconds():
+    """Resolve the experiment duration in seconds from env or config."""
+    env_val = os.environ.get('DURATION')
+    seconds = _parse_duration_seconds(env_val)
+    if seconds is not None:
+        return seconds
+    return _parse_duration_seconds(CONFIG.get('DURATION'))
 
 _TOKEN_SUFFIX_RE = re.compile(r"^(.*)_([0-9]+)-([0-9]+)$")
 
@@ -203,7 +260,7 @@ def run_command_capture(command):
         print(f"Warning: Command '{command}' returned non-zero exit code: {result.returncode}")
     return result.returncode, result.stdout, result.stderr
 
-def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
+def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type):
     """Run the evaluation pipeline steps 3-7"""
     # Step 3: Run loadgen
     run_command("python -u -m fmperf.loadgen.run")
@@ -254,6 +311,9 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir):
         if early_fail:
             result = None
             evaluation_success = False
+        elif experiment_type == 'MIT':
+            # MIT experiments rely on throughput plateau detection later
+            evaluation_success = True
         else:
             result = run_command("python -u evaluate.py", wait=True)
             # Evaluation.py returns 0 for success, non-zero for failure
@@ -381,6 +441,12 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     gpus = os.environ.get('GPUS', '')
     cpus = os.environ.get('CPUS', '')
     node = os.environ.get('NODE', '')
+    experiment_type = get_experiment_type()
+    is_mit = (experiment_type == 'MIT')
+    print(f"Experiment type: {experiment_type}")
+    duration_seconds = _get_duration_seconds()
+    if duration_seconds is None and is_mit:
+        print("Warning: Unable to determine experiment duration; MIT throughput checks may be unavailable.")
     
     print(f"Stored configuration - MODEL: {model}, GPUS: {gpus}, CPUS: {cpus}, NODE: {node}")
     
@@ -416,6 +482,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     # Retry counters for stage 1 and stage 2
     retry_count_stage1 = 0
     retry_count_stage2 = 0
+    mit_prev_requests_per_sec = None
+    last_successful_req_min = None
     
     max_iterations = 100  # Safety limit to prevent infinite loops
     iteration = 0
@@ -477,14 +545,14 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         return None, None
 
     def _compute_median_response_tokens():
-        """Compute median tokens per full response from results file."""
+        """Compute (median tokens per response, total completed requests)."""
         try:
             results_path = os.path.join(REQUESTS_DIR, RESULTS_FILENAME)
             with open(results_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             rows = payload["results"] if isinstance(payload, dict) and "results" in payload else payload
             if not isinstance(rows, list):
-                return None
+                return None, None
             totals = {}
             worker_idxs = set()
             for r in rows:
@@ -502,16 +570,17 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     worker_idxs.add(wid)
             worker_count = len(worker_idxs) if len(worker_idxs) > 0 else 1
             values = [v / worker_count for v in totals.values()]
+            total_completed_requests = len(totals)
             if not values:
-                return 0.0
+                return 0.0, total_completed_requests
             values.sort()
             mid = len(values) // 2
             if len(values) % 2 == 1:
-                return float(values[mid])
-            return (values[mid - 1] + values[mid]) / 2.0
+                return float(values[mid]), total_completed_requests
+            return (values[mid - 1] + values[mid]) / 2.0, total_completed_requests
         except Exception as e:
             print(f"Warning: unable to compute median response tokens: {e}")
-            return None
+            return None, None
 
     while iteration < max_iterations:
         iteration += 1
@@ -521,15 +590,43 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         set_process_env_for_run(req_min)
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
-        evaluation_result = run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir)
-        print(f"Evaluation result: {'Success' if evaluation_result else 'Failure'}")
-        if stage == 2 and not evaluation_result:
-            print(f"Retry count: {retry_count_stage2}")
+        pipeline_result = run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type)
+        evaluation_result = pipeline_result
         # Capture the REQ_MIN used for this evaluation before any update logic
         req_min_used = req_min
+        median_resp_tokens, total_completed_requests = _compute_median_response_tokens()
+        requests_per_sec = None
+        if duration_seconds and total_completed_requests is not None:
+            try:
+                requests_per_sec = total_completed_requests / float(duration_seconds)
+            except Exception:
+                requests_per_sec = None
+
+        if is_mit and evaluation_result:
+            if requests_per_sec is None:
+                print("Warning: Unable to compute requests/sec; marking iteration as plateau failure.")
+                evaluation_result = False
+            else:
+                if mit_prev_requests_per_sec is None:
+                    mit_prev_requests_per_sec = requests_per_sec
+                else:
+                    improvement = requests_per_sec - mit_prev_requests_per_sec
+                    plateau_threshold = max(mit_prev_requests_per_sec * MIT_PLATEAU_REL_TOL, MIT_PLATEAU_ABS_TOL)
+                    if improvement <= plateau_threshold:
+                        evaluation_result = False
+                        print(
+                            f"Detected throughput plateau: prev={mit_prev_requests_per_sec:.4f} req/s, "
+                            f"current={requests_per_sec:.4f} req/s, gain={improvement:.4f} <= threshold={plateau_threshold:.4f}"
+                        )
+                    else:
+                        mit_prev_requests_per_sec = requests_per_sec
+
+        print(f"Evaluation result: {'Success' if evaluation_result else 'Failure'}")
+        if (not is_mit) and stage == 2 and not evaluation_result:
+            print(f"Retry count: {retry_count_stage2}")
         
         # Step 8: Check termination condition (for stage 2)
-        if stage == 2:
+        if (not is_mit) and stage == 2:
             should_end, result_type, result_value = end_experiment(stage, M, m, M_0, m_0, evaluation_result)
             if should_end:
                 if result_type == "REQ_MIN":
@@ -540,22 +637,30 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     return result_value
         
         # Steps 9-10: Update stage variables
-        if stage == 1:
-            (stage, req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false) = update_stage_1(
-                evaluation_result, req_min, retry_count_stage1, highest_true, lowest_false
-            )
-            # If we transitioned to stage 2, reset stage-2 retry counter and log bounds
-            if stage == 2:
-                retry_count_stage2 = 0
-                print(f"Transitioned to Stage 2: highest TRUE = {highest_true}, lowest FALSE = {lowest_false}")
-        elif stage == 2:
-            req_min, M, m, retry_count_stage2 = update_stage_2(
-                evaluation_result, req_min, M, m, retry_count_stage2
-            )
+        if is_mit:
+            multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2.0)
+            if evaluation_result:
+                last_successful_req_min = req_min_used
+                req_min = max(1, int(round(req_min * multiplier)))
+            else:
+                print("MIT experiment detected throughput plateau or evaluation failure; stopping stage 1 loop.")
+                return last_successful_req_min
+        else:
+            if stage == 1:
+                (stage, req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false) = update_stage_1(
+                    evaluation_result, req_min, retry_count_stage1, highest_true, lowest_false
+                )
+                # If we transitioned to stage 2, reset stage-2 retry counter and log bounds
+                if stage == 2:
+                    retry_count_stage2 = 0
+                    print(f"Transitioned to Stage 2: highest TRUE = {highest_true}, lowest FALSE = {lowest_false}")
+            elif stage == 2:
+                req_min, M, m, retry_count_stage2 = update_stage_2(
+                    evaluation_result, req_min, M, m, retry_count_stage2
+                )
 
         # End-of-iteration logging: prompt and median response tokens
         prompt_text, prompt_token_count = _get_prompt_info()
-        median_resp_tokens = _compute_median_response_tokens()
         print("--- Iteration summary ---")
         if prompt_text is not None:
             display_text = prompt_text if len(str(prompt_text)) <= 400 else str(prompt_text)[:400] + "..."
@@ -564,6 +669,10 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             print(f"Prompt token count: {prompt_token_count}")
         if median_resp_tokens is not None:
             print(f"Median tokens per response: {median_resp_tokens:.3f}")
+        if total_completed_requests is not None:
+            print(f"Completed requests: {total_completed_requests}")
+        if requests_per_sec is not None:
+            print(f"Requests per second: {requests_per_sec:.4f}")
 
         # Persist results with explicit values, including the printed median
         try:
