@@ -295,7 +295,7 @@ def run_command_capture(command):
     return result.returncode, result.stdout, result.stderr
 
 def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type):
-    """Run the evaluation pipeline steps 3-7"""
+    """Run the evaluation pipeline steps 3-7 and return throughput metric."""
     # Step 3: Run loadgen
     run_command("python -u -m fmperf.loadgen.run")
     
@@ -309,6 +309,7 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experime
         
         # Early metrics check before splitting results (invoke analyze_metrics.py as a script)
         early_fail = False
+        median_resp_per_min = None
         try:
             code, out, err = run_command_capture("python -u analyze_metrics.py .")
             if code == 0:
@@ -320,6 +321,7 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experime
                         except Exception:
                             pass
                         break
+                median_resp_per_min = avg_resp
                 req_min_env = os.environ.get('REQ_MIN', '0')
                 try:
                     req_min_val = float(req_min_env)
@@ -356,7 +358,7 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experime
             # Evaluation.py returns 0 for success, non-zero for failure
             evaluation_success = (result.returncode == 0)
         
-        return evaluation_success
+        return evaluation_success, median_resp_per_min
         
     finally:
         # Always return to original directory
@@ -519,7 +521,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     # Retry counters for stage 1 and stage 2
     retry_count_stage1 = 0
     retry_count_stage2 = 0
-    mit_prev_requests_per_sec = None
+    mit_rpm_history = []
     last_successful_req_min = None
     
     max_iterations = 100  # Safety limit to prevent infinite loops
@@ -627,8 +629,9 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         set_process_env_for_run(req_min)
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
-        pipeline_result = run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type)
-        evaluation_result = pipeline_result
+        evaluation_result, responded_per_min = run_evaluation_pipeline(
+            model, gpus, cpus, node, stage, parent_dir, experiment_type
+        )
         # Capture the REQ_MIN used for this evaluation before any update logic
         req_min_used = req_min
         median_resp_tokens, total_completed_requests = _compute_median_response_tokens()
@@ -646,27 +649,36 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 )
                 evaluation_result = False
             else:
-                if requests_per_sec is None:
+                responded_per_min = responded_per_min or (
+                    requests_per_sec * 60.0 if requests_per_sec is not None else None
+                )
+                if responded_per_min is None:
                     print(
-                        "Warning: Unable to compute requests/sec for MIT iteration; "
+                        "Warning: Unable to compute responded requests per minute for MIT iteration; "
                         "skipping plateau detection for now."
                     )
-                elif mit_prev_requests_per_sec is None:
-                    mit_prev_requests_per_sec = requests_per_sec
                 else:
-                    improvement = requests_per_sec - mit_prev_requests_per_sec
-                    plateau_threshold = max(
-                        mit_prev_requests_per_sec * MIT_PLATEAU_REL_TOL,
-                        MIT_PLATEAU_ABS_TOL,
-                    )
-                    if improvement <= plateau_threshold:
-                        evaluation_result = False
-                        print(
-                            f"Detected throughput plateau: prev={mit_prev_requests_per_sec:.4f} req/s, "
-                            f"current={requests_per_sec:.4f} req/s, gain={improvement:.4f} <= threshold={plateau_threshold:.4f}"
-                        )
-                    else:
-                        mit_prev_requests_per_sec = requests_per_sec
+                    mit_rpm_history.append(responded_per_min)
+                    if len(mit_rpm_history) >= 3:
+                        third_last = mit_rpm_history[-3]
+                        second_last = mit_rpm_history[-2]
+                        last = mit_rpm_history[-1]
+                        prev_delta = second_last - third_last
+                        curr_delta = last - second_last
+                        threshold = max(abs(prev_delta) * MIT_PLATEAU_REL_TOL, MIT_PLATEAU_ABS_TOL)
+                        if curr_delta < 0:
+                            evaluation_result = False
+                            print(
+                                "Detected throughput regression: "
+                                f"prev={second_last:.4f} rpm -> current={last:.4f} rpm (delta {curr_delta:.4f})."
+                            )
+                        elif abs(curr_delta) <= threshold:
+                            evaluation_result = False
+                            print(
+                                "Detected MIT plateau using last three iterations: "
+                                f"prev Δ={prev_delta:.4f}, current Δ={curr_delta:.4f}, "
+                                f"threshold={threshold:.4f}."
+                            )
 
         print(f"Evaluation result: {'Success' if evaluation_result else 'Failure'}")
         if (not is_mit) and stage == 2 and not evaluation_result:
@@ -718,6 +730,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             print(f"Median tokens per response: {median_resp_tokens:.3f}")
         if total_completed_requests is not None:
             print(f"Completed requests: {total_completed_requests}")
+        if responded_per_min is not None:
+            print(f"Responded requests per minute (median): {responded_per_min:.3f}")
         if requests_per_sec is not None:
             print(f"Requests per second: {requests_per_sec:.4f}")
 
