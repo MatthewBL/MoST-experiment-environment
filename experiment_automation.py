@@ -642,11 +642,13 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     f"MIT iteration failed due to success rate falling below {SUCCESS_RATE_THRESHOLD}%."
                 )
                 evaluation_result = False
-            elif requests_per_sec is None:
-                print("Warning: Unable to compute requests/sec; marking iteration as plateau failure.")
-                evaluation_result = False
             else:
-                if mit_prev_requests_per_sec is None:
+                if requests_per_sec is None:
+                    print(
+                        "Warning: Unable to compute requests/sec for MIT iteration; "
+                        "skipping plateau detection for now."
+                    )
+                elif mit_prev_requests_per_sec is None:
                     mit_prev_requests_per_sec = requests_per_sec
                 else:
                     improvement = requests_per_sec - mit_prev_requests_per_sec
