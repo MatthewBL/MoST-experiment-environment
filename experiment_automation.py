@@ -1,3 +1,4 @@
+import csv
 import os
 import subprocess
 import time
@@ -139,6 +140,7 @@ CONFIG = load_env_config()
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>[smhdSMHD]?)$")
 MIT_PLATEAU_REL_TOL = float(os.environ.get('MIT_PLATEAU_REL_TOL', '0.01'))
 MIT_PLATEAU_ABS_TOL = float(os.environ.get('MIT_PLATEAU_ABS_TOL', '0.5'))
+SUCCESS_RATE_THRESHOLD = float(os.environ.get('SUCCESS_RATE_THRESHOLD', '95.0'))
 
 
 def _normalize_experiment_type(value):
@@ -186,6 +188,38 @@ def _get_duration_seconds():
     if seconds is not None:
         return seconds
     return _parse_duration_seconds(CONFIG.get('DURATION'))
+
+
+def _check_success_rate_threshold(threshold=None):
+    """Check that success_rate column in split CSVs stays above threshold."""
+    effective_threshold = SUCCESS_RATE_THRESHOLD if threshold is None else threshold
+    csv_names = ("first_half.csv", "second_half.csv")
+    base_dir = Path('requests')
+    for name in csv_names:
+        path = base_dir / name
+        if not path.exists():
+            continue
+        try:
+            with path.open('r', encoding='utf-8', newline='') as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames or 'success_rate' not in reader.fieldnames:
+                    continue
+                for row in reader:
+                    raw_val = row.get('success_rate')
+                    if raw_val is None or raw_val == '':
+                        continue
+                    try:
+                        val = float(raw_val)
+                    except ValueError:
+                        continue
+                    if val < effective_threshold:
+                        print(
+                            f"Success rate below {effective_threshold}% detected in {name}: {val}"
+                        )
+                        return False
+        except Exception as exc:
+            print(f"Warning: unable to inspect success_rate in {path}: {exc}")
+    return True
 
 _TOKEN_SUFFIX_RE = re.compile(r"^(.*)_([0-9]+)-([0-9]+)$")
 
@@ -603,7 +637,12 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 requests_per_sec = None
 
         if is_mit and evaluation_result:
-            if requests_per_sec is None:
+            if not _check_success_rate_threshold():
+                print(
+                    f"MIT iteration failed due to success rate falling below {SUCCESS_RATE_THRESHOLD}%."
+                )
+                evaluation_result = False
+            elif requests_per_sec is None:
                 print("Warning: Unable to compute requests/sec; marking iteration as plateau failure.")
                 evaluation_result = False
             else:
@@ -611,7 +650,10 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     mit_prev_requests_per_sec = requests_per_sec
                 else:
                     improvement = requests_per_sec - mit_prev_requests_per_sec
-                    plateau_threshold = max(mit_prev_requests_per_sec * MIT_PLATEAU_REL_TOL, MIT_PLATEAU_ABS_TOL)
+                    plateau_threshold = max(
+                        mit_prev_requests_per_sec * MIT_PLATEAU_REL_TOL,
+                        MIT_PLATEAU_ABS_TOL,
+                    )
                     if improvement <= plateau_threshold:
                         evaluation_result = False
                         print(
