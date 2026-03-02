@@ -642,13 +642,14 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             except Exception:
                 requests_per_sec = None
 
-        if is_mit and evaluation_result:
-            if not _check_success_rate_threshold():
+        if is_mit:
+            success_rate_ok = _check_success_rate_threshold()
+            if not success_rate_ok:
                 print(
                     f"MIT iteration failed due to success rate falling below {SUCCESS_RATE_THRESHOLD}%."
                 )
                 evaluation_result = False
-            else:
+            elif evaluation_result:
                 responded_per_min = responded_per_min or (
                     requests_per_sec * 60.0 if requests_per_sec is not None else None
                 )
