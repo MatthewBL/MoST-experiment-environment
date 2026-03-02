@@ -8,6 +8,7 @@ import os
 import json
 import subprocess
 import time
+from collections import defaultdict
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
@@ -190,9 +191,63 @@ def _get_duration_seconds():
     return _parse_duration_seconds(CONFIG.get('DURATION'))
 
 
-def _check_success_rate_threshold(threshold=None):
-    """Check that success_rate column in split CSVs stays above threshold."""
+def _compute_success_rate_from_results():
+    """Compute overall success rate (%) directly from results payload."""
+    results_path = Path(REQUESTS_DIR) / RESULTS_FILENAME
+    if not results_path.exists():
+        return None
+    try:
+        with results_path.open('r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        print(f"Warning: unable to read {results_path} for success rate check: {exc}")
+        return None
+
+    rows = payload["results"] if isinstance(payload, dict) and "results" in payload else payload
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    request_groups = defaultdict(list)
+    for item in rows:
+        request_idx = item.get('request_idx')
+        if request_idx is None:
+            continue
+        try:
+            req_id = int(request_idx)
+        except (TypeError, ValueError):
+            continue
+        worker_idx = item.get('worker_idx')
+        key = (worker_idx if worker_idx is not None else -1, req_id)
+        request_groups[key].append(item)
+
+    total_requests = len(request_groups)
+    if total_requests == 0:
+        return None
+
+    successful_requests = 0
+    for group in request_groups.values():
+        if all(entry.get('ok') and entry.get('error') == "None" for entry in group):
+            successful_requests += 1
+
+    return (successful_requests / total_requests) * 100.0
+
+
+def _check_success_rate_threshold(threshold=None, prefer_results_json=False):
+    """Check that success rates stay above threshold via CSVs or raw results."""
     effective_threshold = SUCCESS_RATE_THRESHOLD if threshold is None else threshold
+
+    if prefer_results_json:
+        success_rate = _compute_success_rate_from_results()
+        if success_rate is not None:
+            if success_rate < effective_threshold:
+                print(
+                    "Success rate below "
+                    f"{effective_threshold}% detected in results payload: {success_rate}"
+                )
+                return False
+            return True
+        print("Warning: unable to compute success rate from results payload; falling back to CSV inspection.")
+
     csv_names = ("first_half.csv", "second_half.csv")
     base_dir = Path('requests')
     for name in csv_names:
@@ -643,7 +698,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 requests_per_sec = None
 
         if is_mit:
-            success_rate_ok = _check_success_rate_threshold()
+            success_rate_ok = _check_success_rate_threshold(prefer_results_json=True)
             if not success_rate_ok:
                 print(
                     f"MIT iteration failed due to success rate falling below {SUCCESS_RATE_THRESHOLD}%."
