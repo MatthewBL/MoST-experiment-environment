@@ -325,11 +325,14 @@ def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experime
                     req_min_val = float(req_min_env)
                 except ValueError:
                     req_min_val = 0.0
-                if avg_resp < (0.95 * req_min_val):
+                if experiment_type != 'MIT' and avg_resp < (0.95 * req_min_val):
                     print(f"Early evaluation failure: median responded/min = {avg_resp:.3f} < 95% of REQ_MIN = {req_min_val}")
                     early_fail = True
                 else:
-                    print(f"Early metrics check passed: median responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}")
+                    print(
+                        f"Early metrics check{' (MIT informational only)' if experiment_type == 'MIT' else ' passed'}: "
+                        f"median responded/min = {avg_resp:.3f}, REQ_MIN = {req_min_val}"
+                    )
             else:
                 # Non-zero exit from analyze_metrics: log and continue normal flow
                 print(f"Warning: analyze_metrics.py exited with code {code}. stderr: {err.strip()}")
