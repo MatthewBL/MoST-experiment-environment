@@ -490,44 +490,80 @@ def _write_prompts_csv(full_dir_path: str) -> None:
     except Exception as e:
         print(f"Warning: failed to create prompts.csv: {e}")
 
+
+_TIMESTAMP_FORMATS: tuple[str, ...] = (
+    "%d/%m/%Y  %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y%m%dT%H%M%S",
+)
+
+
+def _parse_timestamp_string(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_timestamp_from_csv(path: Path) -> tuple[datetime | None, str | None]:
+    if not path.exists():
+        return None, None
+    try:
+        with path.open("r", encoding="utf-8", newline="") as file:
+            reader = csv.reader(file)
+            next(reader, None)  # header
+            row = next(reader, None)
+    except Exception:
+        return None, None
+    if not row:
+        return None, None
+    raw_value = row[0] if row else None
+    return _parse_timestamp_string(raw_value), raw_value
+
+
+def _sanitize_dir_component(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_-]", "_", value.strip())
+    cleaned = cleaned.strip("_")
+    return cleaned or datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def _derive_directory_name() -> tuple[str, str]:
+    candidates = [
+        Path("first_half.csv"),
+        Path("second_half.csv"),
+        Path("output.csv"),
+    ]
+    for candidate in candidates:
+        dt, raw = _extract_timestamp_from_csv(candidate)
+        if dt:
+            return dt.strftime("%Y-%m-%d_%H-%M-%S"), candidate.name
+        if raw:
+            return _sanitize_dir_component(raw), candidate.name
+    return datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S"), "current_time"
+
 def main():
     try:
         # Check if required CSV files exist
         if not os.path.exists("output.csv"):
             print("Error: output.csv not found")
             return
+
+        missing_halves = [name for name in ("first_half.csv", "second_half.csv") if not os.path.exists(name)]
+        if missing_halves:
+            print(f"Warning: {', '.join(missing_halves)} not found; proceeding without filtered halves.")
         
-        if not os.path.exists("first_half.csv"):
-            print("Error: first_half.csv not found")
-            return
-            
-        if not os.path.exists("second_half.csv"):
-            print("Error: second_half.csv not found")
-            return
-        
-        # Read date from first_half.csv and create directory
-        with open("first_half.csv", 'r') as file:
-            reader = csv.reader(file)
-            rows = list(reader)
-            if len(rows) < 2:
-                print("Error: first_half.csv doesn't have at least 2 rows")
-                return
-            
-            date_str = rows[1][0]  # First column of second row
-            
-            # Parse and format the date for directory name
-            try:
-                # Try parsing with the format you provided
-                date_obj = datetime.strptime(date_str, '%d/%m/%Y  %H:%M:%S')
-                dir_name = date_obj.strftime('%Y-%m-%d_%H-%M-%S')
-            except ValueError:
-                # If that format fails, try some common alternatives
-                try:
-                    date_obj = datetime.strptime(date_str, '%d/%m/%Y %H:%M:%S')
-                    dir_name = date_obj.strftime('%Y-%m-%d_%H-%M-%S')
-                except ValueError:
-                    # If parsing fails, use a sanitized version of the original string
-                    dir_name = date_str.replace('/', '-').replace(':', '-').replace(' ', '_')
+        # Determine directory name based on the first available timestamp source
+        dir_name, timestamp_source = _derive_directory_name()
+        print(f"Using timestamp from {timestamp_source} to create directory: {dir_name}")
         
         # Get parent directory from command line arguments
         parent_dir = None
@@ -691,10 +727,12 @@ def main():
         # Create prompts.csv with unique prompts used
         _write_prompts_csv(full_dir_path)
         
-        # Move CSV files to the new directory
-        shutil.move("output.csv", os.path.join(full_dir_path, "output.csv"))
-        shutil.move("first_half.csv", os.path.join(full_dir_path, "first_half.csv"))
-        shutil.move("second_half.csv", os.path.join(full_dir_path, "second_half.csv"))
+        # Move CSV files to the new directory when available
+        for csv_name in ("output.csv", "first_half.csv", "second_half.csv"):
+            if os.path.exists(csv_name):
+                shutil.move(csv_name, os.path.join(full_dir_path, csv_name))
+            else:
+                print(f"Warning: {csv_name} not found; skipping move.")
         # Keep a copy of results.json in the working directory for downstream readers
         shutil.copyfile("results.json", os.path.join(full_dir_path, "results.json"))
         
