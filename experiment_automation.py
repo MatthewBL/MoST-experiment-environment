@@ -603,6 +603,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             f'python -u generate_requests.py {in_min} {in_max} '
             f'--prompts-file "{prompts_path}"'
         )
+        if out_min is not None and out_max is not None:
+            command += f" --min-output {out_min} --max-output {out_max}"
         run_command(command, wait=True)
         if req_path.is_file():
             print(f"Generated workload: {req_path}")
