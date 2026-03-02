@@ -1,4 +1,5 @@
 import time
+import copy
 import requests
 from typing import Iterable, List
 import json
@@ -123,6 +124,53 @@ def run(result_filename=None):
         # we have stopped
         yield None, 0, time.time_ns(), False, StopIteration()
 
+    def _parse_int_env(key):
+        value = os.environ.get(key)
+        if value is None or value == "":
+            return None
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+
+    def _get_output_token_override_bounds():
+        min_value = _parse_int_env("MIN_OUTPUT_TOKENS")
+        max_value = _parse_int_env("MAX_OUTPUT_TOKENS")
+        if min_value is None and max_value is None:
+            return None
+        if min_value is None:
+            min_value = max_value
+        if max_value is None:
+            max_value = min_value
+        if min_value is None or max_value is None:
+            return None
+        if min_value <= 0 or max_value <= 0:
+            raise ValueError("Output token bounds must be positive")
+        if min_value > max_value:
+            min_value, max_value = max_value, min_value
+        return (min_value, max_value)
+
+    def _build_request_payload(template_request, target, rng, override_bounds):
+        payload = copy.deepcopy(template_request)
+        if not override_bounds:
+            return payload, None
+        min_tokens, max_tokens = override_bounds
+        if max_tokens == min_tokens:
+            desired_tokens = min_tokens
+        else:
+            desired_tokens = int(rng.randint(low=min_tokens, high=max_tokens + 1))
+        if target == "vllm":
+            payload["min_tokens"] = desired_tokens
+            payload["max_tokens"] = desired_tokens
+        elif target == "tgis":
+            params = payload.setdefault("params", {})
+            stopping = params.setdefault("stopping", {})
+            stopping["minNewTokens"] = desired_tokens
+            stopping["maxNewTokens"] = desired_tokens
+        return payload, desired_tokens
+
+    output_token_override = _get_output_token_override_bounds()
+
     infile = os.path.join(REQUESTS_DIR, REQUESTS_FILENAME)
     outfile = os.path.join(REQUESTS_DIR, result_filename)
     target = os.environ["TARGET"]
@@ -183,7 +231,10 @@ def run(result_filename=None):
             # Pick a sample request (thread-safe selection)
             with rs_lock:
                 sample_idx = rs.randint(low=0, high=len(sample_requests))
-            sample_request = sample_requests[sample_idx]["request"]
+            template_request = sample_requests[sample_idx]["request"]
+            request_payload, _ = _build_request_payload(
+                template_request, target, rs, output_token_override
+            )
 
             if target == "vllm":
                 headers = {"User-Agent": "fmaas-load-test"}
@@ -192,7 +243,7 @@ def run(result_filename=None):
                     response = requests.post(
                         "http://%s/v1/completions" % (api_url),
                         headers=headers,
-                        json=sample_request,
+                        json=request_payload,
                         stream=True,
                         timeout=request_timeout
                     )
@@ -221,7 +272,7 @@ def run(result_filename=None):
                     return True
             elif target == "tgis":
                 from text_generation_tests.pb import generation_pb2 as pb2
-                message = json_format.ParseDict(sample_request, pb2.SingleGenerationRequest())
+                message = json_format.ParseDict(request_payload, pb2.SingleGenerationRequest())
                 t0 = time.time_ns()
                 response = stub.GenerateStream(message)
             else:
@@ -361,13 +412,17 @@ def run(result_filename=None):
         all_outputs.extend(tmp)
 
     def check_consistent(row):
-        if row["ok"]:
-            tmp = sample_requests[row["sample_idx"]]["expected"]
-            tmp = tmp[row["response_idx"]]
-            consistent = row["response"] == approx(tmp)
-            return consistent
-        else:
+        if not row["ok"]:
             return False
+        case = sample_requests[row["sample_idx"]]
+        expected = case.get("expected")
+        if not expected:
+            return False
+        if row["response_idx"] >= len(expected):
+            return False
+        tmp = expected[row["response_idx"]]
+        consistent = row["response"] == approx(tmp)
+        return consistent
 
     for row in all_outputs:
         row["consistent"] = check_consistent(row)
