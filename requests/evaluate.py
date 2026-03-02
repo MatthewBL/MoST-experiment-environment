@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
@@ -7,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 import sys
+
+SUCCESS_RATE_THRESHOLD = float(os.environ.get('SUCCESS_RATE_THRESHOLD', '95.0'))
 
 # Function definitions
 def welch_ttest(x: np.ndarray, y: np.ndarray):
@@ -244,14 +248,14 @@ if __name__ == "__main__":
     
     for name, df in datasets.items():
         if "success_rate" in df.columns:
-            if (df["success_rate"] < 95).any():
-                print(f"Success rate below 95% in {name}")
+            if (df["success_rate"] < SUCCESS_RATE_THRESHOLD).any():
+                print(f"Success rate below {SUCCESS_RATE_THRESHOLD}% in {name}")
                 experiment_has_no_statistical_difference_overall = False
                 skip_statistical_analysis_due_to_success_rate = True
                 break
 
     if skip_statistical_analysis_due_to_success_rate:
-        # If any dataset has success_rate < 95%, force overall result to FALSE
+        # If any dataset has success_rate < SUCCESS_RATE_THRESHOLD %, force overall result to FALSE
         final_result = False
         print(f"Overall {STAT_DIFF_COL}: {final_result} (due to low success rate)")
     else:
