@@ -101,17 +101,23 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    _validate_ranges(args.min_input, args.max_input, "Input")
+    min_input = args.min_input
+    max_input = args.max_input
+    _validate_ranges(min_input, max_input, "Input")
+
+    effective_min_output = args.min_output if args.min_output is not None else min_input
+    effective_max_output = args.max_output if args.max_output is not None else max_input
+    _validate_ranges(effective_min_output, effective_max_output, "Output")
 
     prompts_path = args.prompts_file
     if not prompts_path.exists():
         raise FileNotFoundError(f"Prompts file not found: {prompts_path}")
 
     filtered_prompts_path, filtered_count = _build_filtered_prompts_file(
-        prompts_path, args.min_input, args.max_input
+        prompts_path, min_input, max_input
     )
     print(
-        f"Using {filtered_count} prompts from {prompts_path} with {TOKEN_FIELD} between {args.min_input} and {args.max_input}"
+        f"Using {filtered_count} prompts from {prompts_path} with {TOKEN_FIELD} between {min_input} and {max_input}"
     )
 
     requests_dir = Path(REQUESTS_DIR)
@@ -119,7 +125,7 @@ def main() -> None:
     base_name = Path(REQUESTS_FILENAME)
     name_root = base_name.stem
     suffix = base_name.suffix or ".json"
-    default_output = requests_dir / f"{name_root}_{args.min_input}-{args.max_input}{suffix}"
+    default_output = requests_dir / f"{name_root}_{min_input}-{max_input}{suffix}"
     target_path = args.output if args.output is not None else default_output
 
     if target_path.exists() and not args.overwrite:
@@ -132,23 +138,31 @@ def main() -> None:
         "-m",
         "fmperf.loadgen.generate-input",
         "--min-input",
-        str(args.min_input),
+        str(min_input),
         "--max-input",
-        str(args.max_input),
+        str(max_input),
         "--prompts-file",
         str(filtered_prompts_path),
         "--output",
         str(target_path),
     ]
-    if args.min_output is not None:
-        command.extend(["--min-output", str(args.min_output)])
-    if args.max_output is not None:
-        command.extend(["--max-output", str(args.max_output)])
+    command.extend(["--min-output", str(effective_min_output)])
+    command.extend(["--max-output", str(effective_max_output)])
     if args.frac_greedy is not None:
         command.extend(["--frac-greedy", str(args.frac_greedy)])
 
+    legacy_env = os.environ.copy()
+    legacy_env.update(
+        {
+            "MIN_INPUT_TOKENS": str(min_input),
+            "MAX_INPUT_TOKENS": str(max_input),
+            "MIN_OUTPUT_TOKENS": str(effective_min_output),
+            "MAX_OUTPUT_TOKENS": str(effective_max_output),
+        }
+    )
+
     try:
-        result = subprocess.run(command)
+        result = subprocess.run(command, env=legacy_env)
     finally:
         try:
             filtered_prompts_path.unlink()
