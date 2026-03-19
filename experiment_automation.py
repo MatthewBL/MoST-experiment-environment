@@ -577,7 +577,6 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     retry_count_stage1 = 0
     retry_count_stage2 = 0
     mit_rpm_history = []
-    last_successful_req_min = None
     
     max_iterations = 100  # Safety limit to prevent infinite loops
     iteration = 0
@@ -706,7 +705,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     f"MIT iteration failed due to success rate falling below {SUCCESS_RATE_THRESHOLD}%."
                 )
                 evaluation_result = False
-            elif evaluation_result:
+            elif evaluation_result and stage == 1:
                 responded_per_min = responded_per_min or (
                     requests_per_sec * 60.0 if requests_per_sec is not None else None
                 )
@@ -739,33 +738,29 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                             )
 
         print(f"Evaluation result: {'Success' if evaluation_result else 'Failure'}")
-        if (not is_mit) and stage == 2 and not evaluation_result:
+        if stage == 2 and not evaluation_result:
             print(f"Retry count: {retry_count_stage2}")
 
+        # When this is set, persist artifacts for the current iteration first,
+        # then return the recorded value after store_results.py runs.
+        stop_after_persist = False
+        persist_return_value = None
+
         # Step 8: Check termination condition (for stage 2)
-        if (not is_mit) and stage == 2:
+        if stage == 2:
             should_end, result_type, result_value = end_experiment(stage, M, m, M_0, m_0, evaluation_result)
             if should_end:
                 if result_type == "REQ_MIN":
                     print(f"\nExperiment completed successfully! Optimal REQ_MIN = {req_min}")
-                    return req_min
+                    stop_after_persist = True
+                    persist_return_value = req_min
                 else:
                     print(f"\nExperiment completed! Result m = {result_value}")
-                    return result_value
+                    stop_after_persist = True
+                    persist_return_value = result_value
         
         # Steps 9-10: Update stage variables
-        stop_after_persist = False
-        mit_return_value = None
-        if is_mit:
-            multiplier = CONFIG.get('REQ_MIN_INCREASE_MULTIPLIER', 2.0)
-            if evaluation_result:
-                last_successful_req_min = req_min_used
-                req_min = max(1, int(round(req_min * multiplier)))
-            else:
-                print("MIT experiment detected throughput plateau or evaluation failure; stopping stage 1 loop after persisting results.")
-                stop_after_persist = True
-                mit_return_value = last_successful_req_min
-        else:
+        if not stop_after_persist:
             if stage == 1:
                 (stage, req_min, M_0, m_0, M, m, retry_count_stage1, highest_true, lowest_false) = update_stage_1(
                     evaluation_result, req_min, retry_count_stage1, highest_true, lowest_false
@@ -773,6 +768,9 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 # If we transitioned to stage 2, reset stage-2 retry counter and log bounds
                 if stage == 2:
                     retry_count_stage2 = 0
+                    # Reset MIT history to avoid stage-1 trend checks leaking into stage-2 binary search.
+                    if is_mit:
+                        mit_rpm_history = []
                     print(f"Transitioned to Stage 2: highest TRUE = {highest_true}, lowest FALSE = {lowest_false}")
             elif stage == 2:
                 req_min, M, m, retry_count_stage2 = update_stage_2(
@@ -819,7 +817,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         time.sleep(1)
 
         if stop_after_persist:
-            return mit_return_value
+            return persist_return_value
     
     print(f"\nReached maximum iterations ({max_iterations}). Stopping.")
     return None
