@@ -671,6 +671,10 @@ def main():
         # Duration from .env
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
 
+        # Additive proportion telemetry (JSON strings keyed by token interval label)
+        additive_expected_proportions = (os.environ.get('ADDITIVE_EXPECTED_PROPORTIONS') or '').strip()
+        additive_true_proportions = (os.environ.get('ADDITIVE_TRUE_PROPORTIONS') or '').strip()
+
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens() or (prompt_token_count_cli or '').strip()
 
@@ -702,7 +706,8 @@ def main():
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
-                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE"
+                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
+                "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS"
             ])
             # Write data row
             writer.writerow([
@@ -719,7 +724,9 @@ def main():
                 prompt_token_count or '',
                 median_resp_tokens or '',
                 job_id or '',
-                stage
+                stage,
+                additive_expected_proportions,
+                additive_true_proportions
             ])
         
         print(f"Created results.csv in {full_dir_path}")

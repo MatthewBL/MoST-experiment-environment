@@ -504,6 +504,11 @@ def _build_additive_workload(tokens_list, weights):
 
     total_cases = sum(len(cases) for cases in per_interval_cases)
     selected_counts = _weighted_counts(total_cases, weights)
+    total_weight = sum(weights)
+    expected_proportions = [
+        (w / total_weight) if total_weight > 0 else 0.0
+        for w in weights
+    ]
 
     rng = random.Random(42)
     mixed_cases = []
@@ -536,8 +541,30 @@ def _build_additive_workload(tokens_list, weights):
     with mixed_path.open('w', encoding='utf-8') as handle:
         json.dump(mixed_cases, handle)
 
+    total_selected = len(mixed_cases)
+    true_proportions = [
+        (count / total_selected) if total_selected > 0 else 0.0
+        for count in selected_counts
+    ]
+
+    print("Additive proportion check (expected vs true in mixed workload):")
+    for idx, label in enumerate(interval_labels):
+        expected_pct = expected_proportions[idx] * 100.0
+        true_pct = true_proportions[idx] * 100.0
+        delta_pct = true_pct - expected_pct
+        print(
+            f"  - {label}: expected={expected_pct:.3f}% true={true_pct:.3f}% "
+            f"(delta={delta_pct:+.3f}pp, count={selected_counts[idx]})"
+        )
+
     print(f"Created additive mixed workload at {mixed_path} with {len(mixed_cases)} cases")
-    return mixed_path
+    return mixed_path, {
+        "interval_labels": interval_labels,
+        "expected_proportions": expected_proportions,
+        "true_proportions": true_proportions,
+        "selected_counts": selected_counts,
+        "total_cases": total_selected,
+    }
 
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
@@ -799,9 +826,21 @@ def run_experiment_for_tokens(tokens, initial_req_min=None, additive=False, addi
 
     # Set process env for request generation without modifying .env
     req_path = None
+    additive_meta = None
     if additive:
         weights = additive_weights if additive_weights is not None else []
-        req_path = _build_additive_workload(additive_components, weights)
+        req_path, additive_meta = _build_additive_workload(additive_components, weights)
+        if additive_meta is not None:
+            expected_map = {
+                additive_meta["interval_labels"][i]: additive_meta["expected_proportions"][i]
+                for i in range(len(additive_meta["interval_labels"]))
+            }
+            true_map = {
+                additive_meta["interval_labels"][i]: additive_meta["true_proportions"][i]
+                for i in range(len(additive_meta["interval_labels"]))
+            }
+            os.environ['ADDITIVE_EXPECTED_PROPORTIONS'] = json.dumps(expected_map, separators=(',', ':'))
+            os.environ['ADDITIVE_TRUE_PROPORTIONS'] = json.dumps(true_map, separators=(',', ':'))
         set_process_env_for_run(
             req_min,
             input_interval=None,
@@ -810,6 +849,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None, additive=False, addi
             requests_filename=req_path.name,
         )
     else:
+        os.environ.pop('ADDITIVE_EXPECTED_PROPORTIONS', None)
+        os.environ.pop('ADDITIVE_TRUE_PROPORTIONS', None)
         set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
         requests_dir = Path('requests')
         os.chdir(requests_dir)
