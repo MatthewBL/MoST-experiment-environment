@@ -11,6 +11,8 @@ Set your preferences in the [.env](.env) file. Key settings:
 	- `in:outMin-outMax` (fixed input, output range)
 	- `inMin-inMax:outMin-outMax` (both ranges)
 	Examples: `16-64:128-256,32:64-128,64-64:256-256`.
+- Additive mode: Set `ADDITIVE=TRUE` to run a single experiment that mixes all interval pairs from `TOKENS_LIST`.
+- Additive proportions: Set `TOKENS_LIST_PROPORTION` as comma-separated weights aligned by index with `TOKENS_LIST` (for example `1,1,0.5,2`). Lower weights produce fewer prompts for that interval in the mixed workload.
 - REQ_MIN start: Set `REQ_MIN_START` to the initial requests/min value.
 - REQ_MIN increase: Set `REQ_MIN_INCREASE_MULTIPLIER` to control growth during stage 1.
 - Stop threshold: Set `STOP_THRESHOLD` for the stage 2 termination criterion.
@@ -18,6 +20,8 @@ Set your preferences in the [.env](.env) file. Key settings:
 Notes:
 - The values `MIN/MAX_INPUT/OUTPUT_TOKENS` are set per iteration from `TOKENS_LIST`; the [.env](.env) file is not modified during runs.
 - `REQ_MIN` changes automatically per iteration based on `REQ_MIN_INCREASE_MULTIPLIER` (stage 1) and binary search (stage 2); configuration is read from [.env](.env) by [experiment_automation.py](experiment_automation.py).
+- If `ADDITIVE=FALSE` (default), one experiment is run per token interval pair in `TOKENS_LIST`.
+- If `ADDITIVE=TRUE`, exactly one experiment is run using a mixed workload built from all interval pairs and `TOKENS_LIST_PROPORTION`.
 
 # How to run
 Once everything is set up, run the following command:

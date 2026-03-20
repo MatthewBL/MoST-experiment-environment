@@ -1,14 +1,12 @@
 import csv
-import os
-import subprocess
-import time
-from pathlib import Path
-import re
-import os
 import json
+import os
+import random
+import re
 import subprocess
 import time
 from collections import defaultdict
+from pathlib import Path
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
@@ -79,11 +77,40 @@ def _parse_int_list(value):
             continue
     return items
 
+def _parse_float_list(value):
+    """Parse comma-separated floats into a list. Invalid entries are skipped."""
+    items = []
+    if value is None:
+        return items
+    for part in str(value).split(','):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            items.append(float(p))
+        except ValueError:
+            continue
+    return items
+
+
+def _parse_bool(value, default=False):
+    """Parse common boolean strings. Returns default when value is empty/unknown."""
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if s in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return default
+
 def load_env_config():
     """Load configuration from .env file and return a dict.
 
     Expected keys:
     - TOKENS_LIST: comma-separated pairs like "32:32,32:64"
+    - TOKENS_LIST_PROPORTION: comma-separated weights, one per TOKENS_LIST entry
+    - ADDITIVE: TRUE/FALSE, when TRUE run one mixed experiment across TOKENS_LIST
     - REQ_MIN_START: comma-separated integers (per-token-combo initial REQ_MIN)
     - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
         - STOP_THRESHOLD: float (relative stop threshold used as
@@ -92,6 +119,8 @@ def load_env_config():
     env_path = Path('.env')
     config = {
         'TOKENS_LIST': [],
+        'TOKENS_LIST_PROPORTION': [],
+        'ADDITIVE': False,
         'REQ_MIN_START': [1],
         'REQ_MIN_INCREASE_MULTIPLIER': 2.0,
         'STOP_THRESHOLD': 0.5,
@@ -110,6 +139,10 @@ def load_env_config():
                 val = val.strip()
                 if key == 'TOKENS_LIST':
                     config['TOKENS_LIST'] = _parse_tokens_list(val)
+                elif key == 'TOKENS_LIST_PROPORTION':
+                    config['TOKENS_LIST_PROPORTION'] = _parse_float_list(val)
+                elif key == 'ADDITIVE':
+                    config['ADDITIVE'] = _parse_bool(val, default=False)
                 elif key == 'REQ_MIN_START':
                     lst = _parse_int_list(val)
                     # Backwards compatibility: if parsing produced empty but val is a single int, wrap it
@@ -156,6 +189,56 @@ def get_experiment_type():
     if env_val:
         return _normalize_experiment_type(env_val)
     return _normalize_experiment_type(CONFIG.get('EXPERIMENT_TYPE', 'MST'))
+
+
+def is_additive_experiment():
+    """Return whether additive mode is enabled via env or config."""
+    env_val = os.environ.get('ADDITIVE')
+    if env_val is not None:
+        return _parse_bool(env_val, default=False)
+    return bool(CONFIG.get('ADDITIVE', False))
+
+
+def _resolve_tokens_list_proportion(tokens_list):
+    """Return one non-negative weight per token interval pair."""
+    env_val = os.environ.get('TOKENS_LIST_PROPORTION')
+    if env_val is not None:
+        weights = _parse_float_list(env_val)
+    else:
+        weights = list(CONFIG.get('TOKENS_LIST_PROPORTION', []))
+
+    if not tokens_list:
+        return []
+
+    if not weights:
+        return [1.0 for _ in tokens_list]
+
+    cleaned = []
+    for w in weights:
+        try:
+            value = float(w)
+        except (TypeError, ValueError):
+            value = 0.0
+        cleaned.append(max(0.0, value))
+
+    if len(cleaned) < len(tokens_list):
+        print(
+            "Warning: TOKENS_LIST_PROPORTION has fewer values than TOKENS_LIST. "
+            "Missing weights default to 1.0."
+        )
+        cleaned.extend([1.0] * (len(tokens_list) - len(cleaned)))
+    elif len(cleaned) > len(tokens_list):
+        print(
+            "Warning: TOKENS_LIST_PROPORTION has more values than TOKENS_LIST. "
+            "Extra values are ignored."
+        )
+        cleaned = cleaned[:len(tokens_list)]
+
+    if all(w == 0.0 for w in cleaned):
+        print("Warning: all TOKENS_LIST_PROPORTION values are zero. Falling back to uniform weights.")
+        return [1.0 for _ in tokens_list]
+
+    return cleaned
 
 
 def _parse_duration_seconds(value):
@@ -295,7 +378,13 @@ def _get_requests_filename_base():
     os.environ['REQUESTS_FILENAME_BASE'] = normalized
     return normalized
 
-def set_process_env_for_run(req_min_value, input_interval=None, output_interval=None):
+def set_process_env_for_run(
+    req_min_value,
+    input_interval=None,
+    output_interval=None,
+    apply_output_bounds=True,
+    requests_filename=None,
+):
     """Set environment variables in-process for a run without modifying .env.
 
     input_interval/output_interval can be:
@@ -311,13 +400,16 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
         else:
             os.environ['MIN_INPUT_TOKENS'] = str(input_interval)
             os.environ['MAX_INPUT_TOKENS'] = str(input_interval)
-    if output_interval is not None:
+    if apply_output_bounds and output_interval is not None:
         if isinstance(output_interval, (list, tuple)) and len(output_interval) >= 2:
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval[0])
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval[1])
         else:
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval)
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval)
+    elif not apply_output_bounds:
+        os.environ.pop('MIN_OUTPUT_TOKENS', None)
+        os.environ.pop('MAX_OUTPUT_TOKENS', None)
 
     # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
     if input_interval is not None:
@@ -330,6 +422,122 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
         if not ext:
             ext = '.json'
         os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
+    if requests_filename is not None:
+        os.environ['REQUESTS_FILENAME'] = str(requests_filename)
+
+
+def _weighted_counts(total_count, weights):
+    """Distribute total_count across intervals according to weights."""
+    if total_count <= 0 or not weights:
+        return [0 for _ in weights]
+    weight_sum = sum(weights)
+    if weight_sum <= 0:
+        return [0 for _ in weights]
+
+    raw = [(w / weight_sum) * total_count for w in weights]
+    counts = [int(x) for x in raw]
+    remainder = total_count - sum(counts)
+    if remainder > 0:
+        order = sorted(range(len(raw)), key=lambda i: (raw[i] - counts[i]), reverse=True)
+        for idx in order[:remainder]:
+            counts[idx] += 1
+    return counts
+
+
+def _load_cases(path):
+    with path.open('r', encoding='utf-8') as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise ValueError(f"Workload file does not contain a list of cases: {path}")
+    return payload
+
+
+def _build_additive_workload(tokens_list, weights):
+    """Create a single mixed requests file using weighted token-interval proportions."""
+    if not tokens_list:
+        raise ValueError("TOKENS_LIST is empty; additive experiment requires at least one interval.")
+
+    prompts_path = REQUESTS_PROMPTS_FILE.resolve()
+    if not prompts_path.exists():
+        raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
+
+    requests_dir = Path(REQUESTS_DIR)
+    requests_dir.mkdir(parents=True, exist_ok=True)
+
+    base_filename = _get_requests_filename_base()
+    base_name, base_ext = os.path.splitext(base_filename)
+    if not base_ext:
+        base_ext = '.json'
+
+    per_interval_cases = []
+    interval_labels = []
+    for tokens in tokens_list:
+        if len(tokens) >= 4:
+            in_min, in_max, out_min, out_max = tokens[0], tokens[1], tokens[2], tokens[3]
+        else:
+            in_min = in_max = tokens[0]
+            out_min = out_max = tokens[1]
+
+        label = f"{in_min}-{in_max}:{out_min}-{out_max}"
+        interval_labels.append(label)
+        per_interval_filename = f"{base_name}_{in_min}-{in_max}_{out_min}-{out_max}{base_ext}"
+        per_interval_path = requests_dir / per_interval_filename
+
+        if per_interval_path.is_file():
+            print(f"Found cached additive workload component: {per_interval_path}")
+        else:
+            command = (
+                f'python -u generate_requests.py {in_min} {in_max} '
+                f'--prompts-file "{prompts_path}" --min-output {out_min} --max-output {out_max} '
+                f'--output "{per_interval_path}"'
+            )
+            run_command(command, wait=True)
+            if not per_interval_path.is_file():
+                raise FileNotFoundError(
+                    f"Workload generation failed; expected additive component not found: {per_interval_path}"
+                )
+
+        cases = _load_cases(per_interval_path)
+        if not cases:
+            raise ValueError(f"Generated additive component has no cases: {per_interval_path}")
+        per_interval_cases.append(cases)
+
+    total_cases = sum(len(cases) for cases in per_interval_cases)
+    selected_counts = _weighted_counts(total_cases, weights)
+
+    rng = random.Random(42)
+    mixed_cases = []
+    for idx, cases in enumerate(per_interval_cases):
+        target_count = selected_counts[idx]
+        if target_count <= 0:
+            print(f"Additive mix -> interval {interval_labels[idx]} (weight {weights[idx]}): selected 0 cases")
+            continue
+
+        if target_count <= len(cases):
+            selected = rng.sample(cases, target_count)
+        else:
+            selected = list(cases)
+            missing = target_count - len(cases)
+            for _ in range(missing):
+                selected.append(rng.choice(cases))
+
+        mixed_cases.extend(selected)
+        print(
+            f"Additive mix -> interval {interval_labels[idx]} (weight {weights[idx]}): "
+            f"selected {len(selected)} cases"
+        )
+
+    if not mixed_cases:
+        raise ValueError("Additive workload is empty after applying TOKENS_LIST_PROPORTION.")
+
+    rng.shuffle(mixed_cases)
+    mixed_filename = f"{base_name}_additive{base_ext}"
+    mixed_path = requests_dir / mixed_filename
+    with mixed_path.open('w', encoding='utf-8') as handle:
+        json.dump(mixed_cases, handle)
+
+    print(f"Created additive mixed workload at {mixed_path} with {len(mixed_cases)} cases")
+    return mixed_path
 
 def run_command(command, wait=True):
     """Run a shell command and wait for completion"""
@@ -524,7 +732,7 @@ def update_stage_2(evaluation, current_req_min, M, m, retry_count_stage2):
     new_req_min = (M + m) / 2
     return new_req_min, M, m, retry_count_stage2
 
-def run_experiment_for_tokens(tokens, initial_req_min=None):
+def run_experiment_for_tokens(tokens, initial_req_min=None, additive=False, additive_tokens=None, additive_weights=None):
     """Run the complete experiment for a specific token combination.
 
     initial_req_min: optional initial value for REQ_MIN specific to this
@@ -544,21 +752,29 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     
     print(f"Stored configuration - MODEL: {model}, GPUS: {gpus}, CPUS: {cpus}, NODE: {node}")
     
-    # Create parent directory for this token pair
-    # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
-    if len(tokens) >= 4:
-        in_min, in_max, out_min, out_max = tokens[0], tokens[1], tokens[2], tokens[3]
-        parent_dir = f"{in_min}-{in_max}_{out_min}-{out_max}"
-        input_interval = (in_min, in_max)
-        output_interval = (out_min, out_max)
-        interval_strs = (f"{in_min}-{in_max}", f"{out_min}-{out_max}")
+    # Configure experiment mode and token intervals
+    if additive:
+        parent_dir = "additive_experiment"
+        interval_strs = ("MIXED", "MIXED")
+        input_interval = None
+        output_interval = None
+        additive_components = additive_tokens if additive_tokens else [tokens]
+        print(f"Running additive experiment with {len(additive_components)} token interval pairs")
     else:
-        in_min = in_max = tokens[0]
-        out_min = out_max = tokens[1]
-        parent_dir = f"{tokens[0]}_{tokens[1]}"
-        input_interval = tokens[0]
-        output_interval = tokens[1]
-        interval_strs = (str(tokens[0]), str(tokens[1]))
+        # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
+        if len(tokens) >= 4:
+            in_min, in_max, out_min, out_max = tokens[0], tokens[1], tokens[2], tokens[3]
+            parent_dir = f"{in_min}-{in_max}_{out_min}-{out_max}"
+            input_interval = (in_min, in_max)
+            output_interval = (out_min, out_max)
+            interval_strs = (f"{in_min}-{in_max}", f"{out_min}-{out_max}")
+        else:
+            in_min = in_max = tokens[0]
+            out_min = out_max = tokens[1]
+            parent_dir = f"{tokens[0]}_{tokens[1]}"
+            input_interval = tokens[0]
+            output_interval = tokens[1]
+            interval_strs = (str(tokens[0]), str(tokens[1]))
     os.makedirs(parent_dir, exist_ok=True)
     print(f"Created parent directory: {parent_dir}")
     
@@ -581,36 +797,48 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     max_iterations = 100  # Safety limit to prevent infinite loops
     iteration = 0
 
-    # Set process env for the initial request generation without modifying .env
-    set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
-    requests_dir = Path('requests')
-    os.chdir(requests_dir)
-    sample_file = Path('sample_requests.json')
-    if sample_file.exists():
-        sample_file.unlink()
-    os.chdir('..')
-    # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
-    req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-    req_path = Path(REQUESTS_DIR) / req_filename
-    if req_path.is_file():
-        print(f"Found existing workload: {req_path}. Using cached file.")
-    else:
-        prompts_path = REQUESTS_PROMPTS_FILE.resolve()
-        if not prompts_path.exists():
-            raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
-        command = (
-            f'python -u generate_requests.py {in_min} {in_max} '
-            f'--prompts-file "{prompts_path}"'
+    # Set process env for request generation without modifying .env
+    req_path = None
+    if additive:
+        weights = additive_weights if additive_weights is not None else []
+        req_path = _build_additive_workload(additive_components, weights)
+        set_process_env_for_run(
+            req_min,
+            input_interval=None,
+            output_interval=None,
+            apply_output_bounds=False,
+            requests_filename=req_path.name,
         )
-        if out_min is not None and out_max is not None:
-            command += f" --min-output {out_min} --max-output {out_max}"
-        run_command(command, wait=True)
+    else:
+        set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
+        requests_dir = Path('requests')
+        os.chdir(requests_dir)
+        sample_file = Path('sample_requests.json')
+        if sample_file.exists():
+            sample_file.unlink()
+        os.chdir('..')
+        # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
+        req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+        req_path = Path(REQUESTS_DIR) / req_filename
         if req_path.is_file():
-            print(f"Generated workload: {req_path}")
+            print(f"Found existing workload: {req_path}. Using cached file.")
         else:
-            raise FileNotFoundError(
-                f"Workload generation failed; expected file not found: {req_path}"
+            prompts_path = REQUESTS_PROMPTS_FILE.resolve()
+            if not prompts_path.exists():
+                raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
+            command = (
+                f'python -u generate_requests.py {in_min} {in_max} '
+                f'--prompts-file "{prompts_path}"'
             )
+            if out_min is not None and out_max is not None:
+                command += f" --min-output {out_min} --max-output {out_max}"
+            run_command(command, wait=True)
+            if req_path.is_file():
+                print(f"Generated workload: {req_path}")
+            else:
+                raise FileNotFoundError(
+                    f"Workload generation failed; expected file not found: {req_path}"
+                )
     
     def _get_prompt_info():
         """Read prompt text and token count from generated requests file."""
@@ -682,7 +910,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={interval_strs[0]}, OUTPUT_TOKENS={interval_strs[1]}, REQ_MIN={req_min} ---")
         
         # Step 2: Update in-process environment for this iteration (no .env writes)
-        set_process_env_for_run(req_min)
+        set_process_env_for_run(
+            req_min,
+            apply_output_bounds=(not additive),
+            requests_filename=(req_path.name if req_path is not None else None),
+        )
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
         evaluation_result, responded_per_min = run_evaluation_pipeline(
@@ -825,11 +1057,47 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
 def main():
     input_output_tokens = CONFIG.get('TOKENS_LIST', [])
     req_min_starts = CONFIG.get('REQ_MIN_START', [1])
+    additive = is_additive_experiment()
     results = {}
+
+    if additive:
+        if not input_output_tokens:
+            print("No token interval pairs found in TOKENS_LIST. Nothing to run.")
+            return results
+
+        additive_weights = _resolve_tokens_list_proportion(input_output_tokens)
+        initial_req_min = req_min_starts[0] if req_min_starts else 1
+
+        print(f"\n{'='*60}")
+        print("Starting additive experiment with mixed token intervals")
+        print(f"{'='*60}")
+
+        result = run_experiment_for_tokens(
+            input_output_tokens[0],
+            initial_req_min,
+            additive=True,
+            additive_tokens=input_output_tokens,
+            additive_weights=additive_weights,
+        )
+        results["ADDITIVE"] = result
+
+        print("\nCompleted additive experiment")
+        print(f"Result: {result}")
+        print(f"\n{'='*60}")
+        print("ALL EXPERIMENTS COMPLETED")
+        print(f"{'='*60}")
+        print(f"Tokens ADDITIVE: {result}")
+        return results
     
     for idx, tokens in enumerate(input_output_tokens):
         print(f"\n{'='*60}")
-        print(f"Starting experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
+        if len(tokens) >= 4:
+            print(
+                "Starting experiment for "
+                f"INPUT_TOKENS={tokens[0]}-{tokens[1]}, OUTPUT_TOKENS={tokens[2]}-{tokens[3]}"
+            )
+        else:
+            print(f"Starting experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
         print(f"{'='*60}")
         
         # Pick initial REQ_MIN by index; if not enough values, use the last one
@@ -839,9 +1107,17 @@ def main():
             initial_req_min = 1
         
         result = run_experiment_for_tokens(tokens, initial_req_min)
-        results[f"{tokens[0]}_{tokens[1]}"] = result
+        if len(tokens) >= 4:
+            result_key = f"{tokens[0]}-{tokens[1]}_{tokens[2]}-{tokens[3]}"
+            print(
+                "\nCompleted experiment for "
+                f"INPUT_TOKENS={tokens[0]}-{tokens[1]}, OUTPUT_TOKENS={tokens[2]}-{tokens[3]}"
+            )
+        else:
+            result_key = f"{tokens[0]}_{tokens[1]}"
+            print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
+        results[result_key] = result
         
-        print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
         print(f"Result: {result}")
     
     print(f"\n{'='*60}")
