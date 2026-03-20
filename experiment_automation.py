@@ -480,7 +480,9 @@ def _build_additive_workload(tokens_list, weights):
 
         label = f"{in_min}-{in_max}:{out_min}-{out_max}"
         interval_labels.append(label)
-        per_interval_filename = f"{base_name}_{in_min}-{in_max}_{out_min}-{out_max}{base_ext}"
+        # Keep additive component cache aligned with the canonical input-range filename pattern:
+        # REQUESTS_FILENAME_<MIN_INPUT>-<MAX_INPUT>.json
+        per_interval_filename = f"{base_name}_{in_min}-{in_max}{base_ext}"
         per_interval_path = requests_dir / per_interval_filename
 
         if per_interval_path.is_file():
