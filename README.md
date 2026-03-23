@@ -15,7 +15,8 @@ Set your preferences in the [.env](.env) file. Key settings:
 - Additive proportions: Set `TOKENS_LIST_PROPORTION` as comma-separated weights aligned by index with `TOKENS_LIST` (for example `1,1,0.5,2`). Lower weights produce fewer prompts for that interval in the mixed workload.
 - REQ_MIN start: Set `REQ_MIN_START` to the initial requests/min value.
 - REQ_MIN increase: Set `REQ_MIN_INCREASE_MULTIPLIER` to control growth during stage 1.
-- Stop threshold: Set `STOP_THRESHOLD` for the stage 2 termination criterion.
+- Threshold type: Set `THRESHOLD_TYPE` to `relative` or `absolute` for stage 2 stop semantics.
+- Stop threshold: Set `STOP_THRESHOLD` for stage 2 termination (`M - m <= M * STOP_THRESHOLD` for `relative`, or `M - m <= STOP_THRESHOLD` for `absolute`).
 
 Notes:
 - The values `MIN/MAX_INPUT/OUTPUT_TOKENS` are set per iteration from `TOKENS_LIST`; the [.env](.env) file is not modified during runs.
@@ -50,7 +51,9 @@ The experiment consists of two stages:
 REQ_MIN starts at `REQ_MIN_START` and is increased by `REQ_MIN_INCREASE_MULTIPLIER` between iterations. At the end of each iteration, we use the code in [requests/evaluate.py](requests/evaluate.py) to determine if the iteration is sustainable or not. As long as the iterations performed are sustainable, we continue to increase REQ_MIN. As soon as one of them is not sustainable, this stage ends.
 
 ## Find MST
-We set _m_ to the highest stable value for REQ_MIN and _M_ to the found unsustainable value of REQ_MIN. A binary search is performed, where REQ_MIN is set to the in-between value of _M_ and _m_ and we run an iteration. We evaluate the result, and update _m_ or _M_ accordingly, based on whether the value is deemed sustainable or not. This stage ends once _M - m_ is less than or equal to `STOP_THRESHOLD`.
+We set _m_ to the highest stable value for REQ_MIN and _M_ to the found unsustainable value of REQ_MIN. A binary search is performed, where REQ_MIN is set to the in-between value of _M_ and _m_ and we run an iteration. We evaluate the result, and update _m_ or _M_ accordingly, based on whether the value is deemed sustainable or not. This stage ends once the configured threshold condition is met:
+- `THRESHOLD_TYPE=relative`: _M - m_ <= _M_ * `STOP_THRESHOLD`
+- `THRESHOLD_TYPE=absolute`: _M - m_ <= `STOP_THRESHOLD`
 
 ## More information
 

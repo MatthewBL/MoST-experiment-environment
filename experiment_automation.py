@@ -113,8 +113,10 @@ def load_env_config():
     - ADDITIVE: TRUE/FALSE, when TRUE run one mixed experiment across TOKENS_LIST
     - REQ_MIN_START: comma-separated integers (per-token-combo initial REQ_MIN)
     - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
-        - STOP_THRESHOLD: float (relative stop threshold used as
-            M - m <= M * STOP_THRESHOLD in stage 2)
+    - THRESHOLD_TYPE: 'relative' or 'absolute' for stage 2 stop condition
+    - STOP_THRESHOLD: float stop threshold used in stage 2
+        - relative: M - m <= M * STOP_THRESHOLD
+        - absolute: M - m <= STOP_THRESHOLD
     """
     env_path = Path('.env')
     config = {
@@ -123,6 +125,7 @@ def load_env_config():
         'ADDITIVE': False,
         'REQ_MIN_START': [1],
         'REQ_MIN_INCREASE_MULTIPLIER': 2.0,
+        'THRESHOLD_TYPE': 'relative',
         'STOP_THRESHOLD': 0.5,
         'EXPERIMENT_TYPE': 'MST',
         'DURATION': None,
@@ -157,6 +160,8 @@ def load_env_config():
                         config['REQ_MIN_INCREASE_MULTIPLIER'] = float(val)
                     except ValueError:
                         pass
+                elif key == 'THRESHOLD_TYPE':
+                    config['THRESHOLD_TYPE'] = val.strip().lower() or 'relative'
                 elif key == 'STOP_THRESHOLD':
                     try:
                         config['STOP_THRESHOLD'] = float(val)
@@ -175,6 +180,24 @@ _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>[smhdSMHD]?)$
 MIT_PLATEAU_REL_TOL = float(os.environ.get('MIT_PLATEAU_REL_TOL', '0.01'))
 MIT_PLATEAU_ABS_TOL = float(os.environ.get('MIT_PLATEAU_ABS_TOL', '0.5'))
 SUCCESS_RATE_THRESHOLD = float(os.environ.get('SUCCESS_RATE_THRESHOLD', '95.0'))
+
+
+def _normalize_threshold_type(value):
+    if not value:
+        return 'relative'
+    normalized = value.strip().lower()
+    if normalized in {'relative', 'absolute'}:
+        return normalized
+    print(f"Warning: unknown THRESHOLD_TYPE '{value}'. Falling back to 'relative'.")
+    return 'relative'
+
+
+def get_threshold_type():
+    """Return stage 2 threshold type from env or .env config."""
+    env_val = os.environ.get('THRESHOLD_TYPE')
+    if env_val:
+        return _normalize_threshold_type(env_val)
+    return _normalize_threshold_type(CONFIG.get('THRESHOLD_TYPE', 'relative'))
 
 
 def _normalize_experiment_type(value):
@@ -661,20 +684,24 @@ def start_stage_1():
     return 1
 
 def end_experiment(stage, M, m, M_0, m_0, evaluation):
-    """Check termination condition for stage 2 using a relative threshold based on M.
+    """Check termination condition for stage 2 using configured threshold semantics.
 
-    Stops when the gap (M - m) is less than or equal to M * STOP_THRESHOLD.
-    Falls back to absolute STOP_THRESHOLD if M or m are not numbers.
+    - THRESHOLD_TYPE=relative: stop when M - m <= M * STOP_THRESHOLD
+    - THRESHOLD_TYPE=absolute: stop when M - m <= STOP_THRESHOLD
     """
     stop_threshold = CONFIG.get('STOP_THRESHOLD', 0.5)
+    threshold_type = get_threshold_type()
     if stage == 2 and (M is not None) and (m is not None):
         try:
-            relative_threshold = float(M) * float(stop_threshold)
+            if threshold_type == 'absolute':
+                threshold_value = float(stop_threshold)
+            else:
+                threshold_value = float(M) * float(stop_threshold)
         except Exception:
             # Fallback: treat threshold as absolute if casting fails
-            relative_threshold = float(stop_threshold)
+            threshold_value = float(stop_threshold)
 
-        if (M - m) <= relative_threshold:
+        if (M - m) <= threshold_value:
             if evaluation:
                 return True, "REQ_MIN", None  # Return REQ_MIN as result
             else:
