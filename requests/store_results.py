@@ -373,6 +373,204 @@ def _compute_median_prompt_tokens() -> str | None:
     except Exception:
         return None
 
+
+def _to_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _format_metric(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    try:
+        v = float(value)
+    except Exception:
+        return ""
+    if v.is_integer():
+        return str(int(v))
+    return f"{v:.3f}"
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    p = max(0.0, min(100.0, float(percentile)))
+    rank = (p / 100.0) * (len(sorted_values) - 1)
+    low = int(rank)
+    high = min(low + 1, len(sorted_values) - 1)
+    frac = rank - low
+    return sorted_values[low] + (sorted_values[high] - sorted_values[low]) * frac
+
+
+def _basic_stats(values: list[float]) -> tuple[float | None, float | None, str]:
+    if not values:
+        return None, None, ""
+
+    n = len(values)
+    avg = sum(values) / n
+    variance = sum((x - avg) ** 2 for x in values) / n
+
+    ordered = sorted(values)
+    p50 = _percentile(ordered, 50)
+    p90 = _percentile(ordered, 90)
+    p95 = _percentile(ordered, 95)
+    p99 = _percentile(ordered, 99)
+    percentiles = {
+        "p50": _format_metric(p50),
+        "p90": _format_metric(p90),
+        "p95": _format_metric(p95),
+        "p99": _format_metric(p99),
+    }
+
+    return avg, variance, json.dumps(percentiles, separators=(",", ":"))
+
+
+def _normalize_request_key(worker_idx: object, request_idx: object, fallback_request_idx: int) -> tuple[int | None, int]:
+    wid = None
+    if isinstance(worker_idx, (int, float)):
+        wid = int(worker_idx)
+    elif isinstance(worker_idx, str) and worker_idx.strip().lstrip("-+").isdigit():
+        wid = int(worker_idx.strip())
+
+    rid = fallback_request_idx
+    if isinstance(request_idx, (int, float)):
+        rid = int(request_idx)
+    elif isinstance(request_idx, str) and request_idx.strip().lstrip("-+").isdigit():
+        rid = int(request_idx.strip())
+
+    return wid, rid
+
+
+def _read_prompt_token_counts() -> list[float]:
+    req_path = _find_requests_file()
+    if not req_path:
+        return []
+
+    try:
+        payload = json.loads(req_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if isinstance(payload, dict):
+        items = payload.get("requests") or payload.get("data") or payload.get("items") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+
+    vals: list[float] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        v = None
+        for key in ("prompt_token_count", "input_token_count", "prompt_len", "input_tokens"):
+            num = _to_float(it.get(key))
+            if num is not None:
+                v = num
+                break
+        if v is not None:
+            vals.append(v)
+    return vals
+
+
+def _read_output_token_counts(results_path: Path) -> list[float]:
+    if not results_path.exists():
+        return []
+
+    try:
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        items = payload["results"]
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+
+    max_response_idx: dict[tuple[int | None, int], int] = {}
+    n_tokens_sum: dict[tuple[int | None, int], float] = {}
+    fallback_request_idx = -1
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        rid_raw = it.get("request_idx")
+        rsi_raw = it.get("response_idx")
+
+        if rid_raw is None:
+            rsi_num = _to_float(rsi_raw)
+            if rsi_num is not None and int(rsi_num) == 0:
+                fallback_request_idx += 1
+            if fallback_request_idx < 0:
+                fallback_request_idx = 0
+            rid_raw = fallback_request_idx
+
+        key = _normalize_request_key(it.get("worker_idx"), rid_raw, fallback_request_idx)
+
+        n_tok = _to_float(it.get("n_tokens"))
+        if n_tok is not None and n_tok > 0:
+            n_tokens_sum[key] = n_tokens_sum.get(key, 0.0) + n_tok
+
+        rsi_num = _to_float(rsi_raw)
+        if rsi_num is not None:
+            idx = int(rsi_num)
+            prev = max_response_idx.get(key, -1)
+            if idx > prev:
+                max_response_idx[key] = idx
+
+    all_keys = set(max_response_idx.keys()) | set(n_tokens_sum.keys())
+    out: list[float] = []
+    for key in all_keys:
+        if key in n_tokens_sum and n_tokens_sum[key] > 0:
+            out.append(n_tokens_sum[key])
+        elif key in max_response_idx and max_response_idx[key] >= 0:
+            out.append(float(max_response_idx[key] + 1))
+    return out
+
+
+def _compute_token_quality_metrics(
+    results_path: Path,
+    expected_output_min: float | None,
+    expected_output_max: float | None,
+) -> dict[str, str]:
+    input_counts = _read_prompt_token_counts()
+    output_counts = _read_output_token_counts(results_path)
+
+    avg_in, var_in, pct_in = _basic_stats(input_counts)
+    avg_out, var_out, pct_out = _basic_stats(output_counts)
+
+    within = None
+    outside = None
+    if output_counts and expected_output_min is not None and expected_output_max is not None:
+        low = min(expected_output_min, expected_output_max)
+        high = max(expected_output_min, expected_output_max)
+        in_count = sum(1 for v in output_counts if low <= v <= high)
+        out_count = len(output_counts) - in_count
+        within = in_count
+        outside = out_count
+
+    return {
+        "responses_within_expected_interval": _format_metric(within),
+        "responses_outside_expected_interval": _format_metric(outside),
+        "avg_tokens_per_request": _format_metric(avg_in),
+        "avg_tokens_per_response": _format_metric(avg_out),
+        "input_token_variance": _format_metric(var_in),
+        "output_token_variance": _format_metric(var_out),
+        "input_token_percentiles": pct_in,
+        "output_token_percentiles": pct_out,
+    }
+
 def _find_requests_file() -> Optional[Path]:
     """Locate the requests JSON file generated by generate-input.
 
@@ -695,6 +893,14 @@ def main():
         if not success_rate and sr_from_results:
             success_rate = sr_from_results
 
+        expected_output_min = _to_float(min_output_tokens)
+        expected_output_max = _to_float(max_output_tokens)
+        token_quality = _compute_token_quality_metrics(
+            Path("results.json"),
+            expected_output_min,
+            expected_output_max,
+        )
+
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
@@ -706,7 +912,16 @@ def main():
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
-                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
+                "MEDIAN_RESPONSE_TOKENS",
+                "RESPONSES_WITHIN_EXPECTED_INTERVAL",
+                "RESPONSES_OUTSIDE_EXPECTED_INTERVAL",
+                "AVG_TOKENS_PER_REQUEST",
+                "AVG_TOKENS_PER_RESPONSE",
+                "INPUT_TOKEN_VARIANCE",
+                "OUTPUT_TOKEN_VARIANCE",
+                "INPUT_TOKEN_PERCENTILES",
+                "OUTPUT_TOKEN_PERCENTILES",
+                "JOB_ID", "STAGE",
                 "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS"
             ])
             # Write data row
@@ -723,6 +938,14 @@ def main():
                 success_rate or '',
                 prompt_token_count or '',
                 median_resp_tokens or '',
+                token_quality.get("responses_within_expected_interval", ""),
+                token_quality.get("responses_outside_expected_interval", ""),
+                token_quality.get("avg_tokens_per_request", ""),
+                token_quality.get("avg_tokens_per_response", ""),
+                token_quality.get("input_token_variance", ""),
+                token_quality.get("output_token_variance", ""),
+                token_quality.get("input_token_percentiles", ""),
+                token_quality.get("output_token_percentiles", ""),
                 job_id or '',
                 stage,
                 additive_expected_proportions,
