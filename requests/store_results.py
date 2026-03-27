@@ -4,6 +4,7 @@ import csv
 import json
 import shutil
 import sys
+import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -415,6 +416,210 @@ def _find_requests_file() -> Optional[Path]:
             continue
     return None
 
+
+def _find_results_file() -> Optional[Path]:
+    """Locate results payload (supports common typo `resuls.json`)."""
+    candidates = [
+        Path("results.json"),
+        Path("resuls.json"),
+        Path("..") / "results.json",
+        Path("..") / "resuls.json",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _extract_input_token_counts() -> list[float]:
+    """Read input token counts from generated requests payload."""
+    req_path = _find_requests_file()
+    if not req_path:
+        return []
+    try:
+        payload = json.loads(req_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            items = payload.get("requests") or payload.get("data") or payload.get("items") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+
+        counts: list[float] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+
+            candidates = [
+                it.get("prompt_token_count"),
+                it.get("input_token_count"),
+                it.get("prompt_len"),
+                it.get("input_tokens"),
+            ]
+            cfg = it.get("config")
+            if isinstance(cfg, dict):
+                candidates.append(cfg.get("in_tokens"))
+
+            val = None
+            for c in candidates:
+                if isinstance(c, (int, float)):
+                    val = float(c)
+                    break
+                if isinstance(c, str) and c.strip():
+                    try:
+                        val = float(c.strip())
+                        break
+                    except Exception:
+                        continue
+            if val is not None:
+                counts.append(val)
+        return counts
+    except Exception:
+        return []
+
+
+def _format_number(value: float | None) -> str:
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _compute_percentiles(values: list[float], points: list[int]) -> dict[str, float]:
+    """Compute linear-interpolated percentiles for sorted/unsorted values."""
+    if not values:
+        return {}
+    vals = sorted(values)
+    n = len(vals)
+    out: dict[str, float] = {}
+    for p in points:
+        if p <= 0:
+            out[f"p{p}"] = vals[0]
+            continue
+        if p >= 100:
+            out[f"p{p}"] = vals[-1]
+            continue
+        rank = (n - 1) * (p / 100.0)
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        frac = rank - lo
+        out[f"p{p}"] = vals[lo] + (vals[hi] - vals[lo]) * frac
+    return out
+
+
+def _percentiles_to_json(values: list[float], points: list[int]) -> str:
+    pct = _compute_percentiles(values, points)
+    if not pct:
+        return ""
+    formatted = {k: (int(v) if float(v).is_integer() else round(v, 6)) for k, v in pct.items()}
+    return json.dumps(formatted, separators=(",", ":"))
+
+
+def _to_int_or_none(value: str | None) -> int | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _compute_token_length_metrics(results_path: Path, expected_min: int | None, expected_max: int | None) -> dict[str, str]:
+    """Compute response-length compliance and token distribution metrics.
+
+    Uses results payload as primary source for output token lengths and requests
+    payload for input token stats.
+    """
+    output_counts: list[float] = []
+
+    try:
+        if results_path.exists():
+            payload = json.loads(results_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                items = payload["results"]
+            elif isinstance(payload, list):
+                items = payload
+            else:
+                items = []
+
+            max_resp_idx: dict[tuple[int | None, int | None], int] = {}
+            current_rid = -1
+
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("request_idx")
+                wid = it.get("worker_idx")
+                rsi = it.get("response_idx")
+
+                if rid is None:
+                    if isinstance(rsi, (int, float)) and int(rsi) == 0:
+                        current_rid += 1
+                    if current_rid < 0:
+                        current_rid = 0
+                    rid = current_rid
+
+                key = (
+                    int(wid) if isinstance(wid, (int, float, str)) and str(wid).lstrip("-+").isdigit() else None,
+                    int(rid) if isinstance(rid, (int, float, str)) and str(rid).lstrip("-+").isdigit() else None,
+                )
+
+                if isinstance(rsi, (int, float, str)):
+                    try:
+                        val = int(float(rsi))
+                        prev = max_resp_idx.get(key, -1)
+                        if val > prev:
+                            max_resp_idx[key] = val
+                    except Exception:
+                        pass
+
+            output_counts = [float(v + 1) for v in max_resp_idx.values() if isinstance(v, int) and v >= 0]
+    except Exception:
+        output_counts = []
+
+    input_counts = _extract_input_token_counts()
+
+    within = ""
+    outside = ""
+    if output_counts and expected_min is not None and expected_max is not None:
+        w = 0
+        for c in output_counts:
+            ci = int(c)
+            if expected_min <= ci <= expected_max:
+                w += 1
+        o = len(output_counts) - w
+        within = str(w)
+        outside = str(o)
+
+    input_avg = _format_number(sum(input_counts) / len(input_counts)) if input_counts else ""
+    output_avg = _format_number(sum(output_counts) / len(output_counts)) if output_counts else ""
+
+    input_var = _format_number(statistics.pvariance(input_counts)) if input_counts else ""
+    output_var = _format_number(statistics.pvariance(output_counts)) if output_counts else ""
+
+    # Report standard percentiles used in benchmarking summaries.
+    pct_points = [50, 90, 95, 99]
+    input_pct = _percentiles_to_json(input_counts, pct_points)
+    output_pct = _percentiles_to_json(output_counts, pct_points)
+
+    return {
+        "responses_within_expected_interval": within,
+        "responses_outside_expected_interval": outside,
+        "average_tokens_per_request": input_avg,
+        "average_tokens_per_response": output_avg,
+        "input_token_variance": input_var,
+        "output_token_variance": output_var,
+        "input_token_percentiles": input_pct,
+        "output_token_percentiles": output_pct,
+    }
+
 def _write_prompts_csv(full_dir_path: str) -> None:
     """Create prompts.csv with unique prompts used in this run.
 
@@ -689,12 +894,20 @@ def main():
         if median_resp_tokens is None:
             log_median = _extract_median_tokens_from_log(slurm_path)
             median_resp_tokens = log_median if log_median else None
-        comp_median, total_requests, sr_from_results = _compute_median_response_tokens(Path('results.json'))
+        results_payload_path = _find_results_file() or Path("results.json")
+
+        comp_median, total_requests, sr_from_results = _compute_median_response_tokens(results_payload_path)
         if median_resp_tokens is None:
             median_resp_tokens = comp_median
         if not success_rate and sr_from_results:
             success_rate = sr_from_results
-            
+
+        token_metrics = _compute_token_length_metrics(
+            results_payload_path,
+            _to_int_or_none(min_output_tokens),
+            _to_int_or_none(max_output_tokens),
+        )
+
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
@@ -706,8 +919,11 @@ def main():
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
-                "MEDIAN_RESPONSE_TOKENS",
-                "JOB_ID", "STAGE",
+                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
+                "RESPONSES_WITHIN_EXPECTED_INTERVAL", "RESPONSES_OUTSIDE_EXPECTED_INTERVAL",
+                "AVERAGE_TOKENS_PER_REQUEST", "AVERAGE_TOKENS_PER_RESPONSE",
+                "INPUT_TOKEN_VARIANCE", "OUTPUT_TOKEN_VARIANCE",
+                "INPUT_TOKEN_PERCENTILES", "OUTPUT_TOKEN_PERCENTILES",
                 "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS"
             ])
             # Write data row
@@ -726,6 +942,14 @@ def main():
                 median_resp_tokens or '',
                 job_id or '',
                 stage,
+                token_metrics.get("responses_within_expected_interval", ""),
+                token_metrics.get("responses_outside_expected_interval", ""),
+                token_metrics.get("average_tokens_per_request", ""),
+                token_metrics.get("average_tokens_per_response", ""),
+                token_metrics.get("input_token_variance", ""),
+                token_metrics.get("output_token_variance", ""),
+                token_metrics.get("input_token_percentiles", ""),
+                token_metrics.get("output_token_percentiles", ""),
                 additive_expected_proportions,
                 additive_true_proportions
             ])
@@ -741,8 +965,11 @@ def main():
                 shutil.move(csv_name, os.path.join(full_dir_path, csv_name))
             else:
                 print(f"Warning: {csv_name} not found; skipping move.")
-        # Keep a copy of results.json in the working directory for downstream readers
-        shutil.copyfile("results.json", os.path.join(full_dir_path, "results.json"))
+        # Keep a copy of results payload in the working directory for downstream readers.
+        if results_payload_path.exists():
+            shutil.copyfile(str(results_payload_path), os.path.join(full_dir_path, "results.json"))
+        else:
+            print("Warning: results payload not found; skipping results.json copy.")
         
         print("Moved CSV files and copied results.json to the directory")
         
