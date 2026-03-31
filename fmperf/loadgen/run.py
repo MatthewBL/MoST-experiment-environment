@@ -17,6 +17,7 @@ from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILE
 import threading
 import itertools
 import math
+import random
 
 
 def run(result_filename=None):
@@ -133,6 +134,79 @@ def run(result_filename=None):
         except ValueError:
             return None
 
+    def _parse_bool_env(key, default=False):
+        value = os.environ.get(key)
+        if value is None:
+            return default
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+
+    def _parse_tokens_list_env(value):
+        tokens = []
+        if not value:
+            return tokens
+        for item in str(value).split(','):
+            raw = item.strip()
+            if not raw or ':' not in raw:
+                continue
+            in_part, out_part = raw.split(':', 1)
+            try:
+                if '-' in in_part:
+                    in_min_str, in_max_str = in_part.split('-', 1)
+                    in_min = int(in_min_str.strip())
+                    in_max = int(in_max_str.strip())
+                else:
+                    in_min = in_max = int(in_part.strip())
+                if '-' in out_part:
+                    out_min_str, out_max_str = out_part.split('-', 1)
+                    out_min = int(out_min_str.strip())
+                    out_max = int(out_max_str.strip())
+                else:
+                    out_min = out_max = int(out_part.strip())
+            except ValueError:
+                continue
+            if in_min > in_max:
+                in_min, in_max = in_max, in_min
+            if out_min > out_max:
+                out_min, out_max = out_max, out_min
+            if in_min <= 0 or in_max <= 0 or out_min <= 0 or out_max <= 0:
+                continue
+            tokens.append((in_min, in_max, out_min, out_max))
+        return tokens
+
+    def _parse_float_list_env(value):
+        values = []
+        if value is None:
+            return values
+        for part in str(value).split(','):
+            piece = part.strip()
+            if not piece:
+                continue
+            try:
+                values.append(float(piece))
+            except ValueError:
+                continue
+        return values
+
+    def _weighted_counts(total_count, weights):
+        if total_count <= 0 or not weights:
+            return [0 for _ in weights]
+        weight_sum = sum(weights)
+        if weight_sum <= 0:
+            return [0 for _ in weights]
+        raw = [(w / weight_sum) * total_count for w in weights]
+        counts = [int(x) for x in raw]
+        remaining = total_count - sum(counts)
+        if remaining > 0:
+            order = sorted(range(len(raw)), key=lambda idx: (raw[idx] - counts[idx]), reverse=True)
+            for idx in order[:remaining]:
+                counts[idx] += 1
+        return counts
+
     def _get_output_token_override_bounds():
         min_value = _parse_int_env("MIN_OUTPUT_TOKENS")
         max_value = _parse_int_env("MAX_OUTPUT_TOKENS")
@@ -150,13 +224,23 @@ def run(result_filename=None):
             min_value, max_value = max_value, min_value
         return (min_value, max_value)
 
-    def _build_request_payload(template_request, target, rng, override_bounds):
+    def _build_request_payload(template_request, target, rng, override_bounds, exact_output_tokens=True):
         payload = copy.deepcopy(template_request)
         if not override_bounds:
             return payload, None
         min_tokens, max_tokens = override_bounds
-        if max_tokens == min_tokens:
-            desired_tokens = min_tokens
+        if not exact_output_tokens:
+            if target == "vllm":
+                payload["min_tokens"] = int(min_tokens)
+                payload["max_tokens"] = int(max_tokens)
+            elif target == "tgis":
+                params = payload.setdefault("params", {})
+                stopping = params.setdefault("stopping", {})
+                stopping["minNewTokens"] = int(min_tokens)
+                stopping["maxNewTokens"] = int(max_tokens)
+            return payload, (int(min_tokens), int(max_tokens))
+        if int(max_tokens) == int(min_tokens):
+            desired_tokens = int(min_tokens)
         else:
             desired_tokens = int(rng.randint(low=min_tokens, high=max_tokens + 1))
         if target == "vllm":
@@ -168,8 +252,6 @@ def run(result_filename=None):
             stopping["minNewTokens"] = desired_tokens
             stopping["maxNewTokens"] = desired_tokens
         return payload, desired_tokens
-
-    output_token_override = _get_output_token_override_bounds()
 
     infile = os.path.join(REQUESTS_DIR, REQUESTS_FILENAME)
     outfile = os.path.join(REQUESTS_DIR, result_filename)
@@ -188,9 +270,86 @@ def run(result_filename=None):
     with open(infile, "rb") as f:
         sample_requests = json.load(f)
 
+    output_token_override = _get_output_token_override_bounds()
+    additive_enabled = _parse_bool_env("ADDITIVE", default=False)
+    additive_tokens = _parse_tokens_list_env(os.environ.get("TOKENS_LIST", ""))
+
+    use_additive_scheduler = additive_enabled and len(additive_tokens) > 0
+    additive_schedule = []
+    additive_interval_case_indices = []
+    additive_case_cursors = []
+    additive_output_bounds = []
+    additive_lock = threading.Lock()
+    additive_schedule_cursor = itertools.count()
+
+    if use_additive_scheduler:
+        additive_weights = _parse_float_list_env(os.environ.get("TOKENS_LIST_PROPORTION"))
+        cleaned_weights = [max(0.0, float(x)) for x in additive_weights]
+        if len(cleaned_weights) < len(additive_tokens):
+            cleaned_weights.extend([1.0] * (len(additive_tokens) - len(cleaned_weights)))
+        elif len(cleaned_weights) > len(additive_tokens):
+            cleaned_weights = cleaned_weights[:len(additive_tokens)]
+        if not cleaned_weights or all(weight == 0.0 for weight in cleaned_weights):
+            cleaned_weights = [1.0 for _ in additive_tokens]
+
+        estimated_requests = int(math.ceil((req_min * duration.to_seconds() * 1.1) / 60.0))
+        estimated_requests = max(1, estimated_requests)
+        additive_counts = _weighted_counts(estimated_requests, cleaned_weights)
+        for interval_idx, interval_count in enumerate(additive_counts):
+            additive_schedule.extend([interval_idx] * interval_count)
+        random.Random(42).shuffle(additive_schedule)
+
+        additive_output_bounds = [(tokens[2], tokens[3]) for tokens in additive_tokens]
+        additive_interval_case_indices = [[] for _ in additive_tokens]
+        additive_case_cursors = [0 for _ in additive_tokens]
+        for sample_idx, sample in enumerate(sample_requests):
+            config = sample.get("config", {}) if isinstance(sample, dict) else {}
+            in_tokens = config.get("in_tokens")
+            if in_tokens is None:
+                request_obj = sample.get("request", {}) if isinstance(sample, dict) else {}
+                prompt_ids = request_obj.get("prompt") if isinstance(request_obj, dict) else None
+                if isinstance(prompt_ids, list):
+                    in_tokens = len(prompt_ids)
+            if in_tokens is None:
+                continue
+            try:
+                in_tokens = int(in_tokens)
+            except (TypeError, ValueError):
+                continue
+            for interval_idx, interval in enumerate(additive_tokens):
+                in_min, in_max, _, _ = interval
+                if in_min <= in_tokens <= in_max:
+                    additive_interval_case_indices[interval_idx].append(sample_idx)
+
+        empty_intervals = [
+            idx for idx, indices in enumerate(additive_interval_case_indices) if len(indices) == 0
+        ]
+        if empty_intervals:
+            print(
+                "Warning: additive scheduler found no prompt candidates for intervals: "
+                + ", ".join(str(additive_tokens[idx]) for idx in empty_intervals)
+            )
+
+        print(
+            f">> Additive scheduler enabled with {len(additive_tokens)} intervals, "
+            f"{len(additive_schedule)} scheduled slots (10% margin)."
+        )
+    else:
+        if additive_enabled:
+            print(
+                "Warning: ADDITIVE is enabled but TOKENS_LIST is empty/invalid; "
+                "falling back to random request sampling."
+            )
+
+    all_sample_indices = list(range(len(sample_requests)))
+
     def worker(wid, channel, worker_req_per_sec, exp_num_users):
         rs = np.random.RandomState(seed=wid)
         rs_lock = threading.Lock()
+        stub = None
+        if target == "tgis":
+            from text_generation_tests.pb import generation_pb2_grpc as gpb2
+            stub = gpb2.GenerationServiceStub(channel)
         
         # Calculate requests per second for this worker with some randomness
         # worker_req_per_sec is the target per worker (REQ_MIN split by num_workers)
@@ -228,13 +387,36 @@ def run(result_filename=None):
             interval_base_ns = float('inf')
 
         def process_request(req_idx):
-            # Pick a sample request (thread-safe selection)
-            with rs_lock:
-                sample_idx = rs.randint(low=0, high=len(sample_requests))
+            # For additive mode, pick from a precomputed global schedule and wrap around as needed.
+            per_request_override = output_token_override
+            exact_output_tokens = True
+            if use_additive_scheduler:
+                with additive_lock:
+                    schedule_pos = next(additive_schedule_cursor)
+                    schedule_idx = schedule_pos % len(additive_schedule)
+                    interval_idx = additive_schedule[schedule_idx]
+                    interval_candidates = additive_interval_case_indices[interval_idx]
+                    if interval_candidates:
+                        cursor = additive_case_cursors[interval_idx]
+                        sample_idx = interval_candidates[cursor % len(interval_candidates)]
+                        additive_case_cursors[interval_idx] = cursor + 1
+                    else:
+                        sample_idx = all_sample_indices[schedule_pos % len(all_sample_indices)]
+                    per_request_override = additive_output_bounds[interval_idx]
+                    exact_output_tokens = False
+            else:
+                # Pick a sample request (thread-safe selection)
+                with rs_lock:
+                    sample_idx = rs.randint(low=0, high=len(sample_requests))
             template_request = sample_requests[sample_idx]["request"]
-            request_payload, _ = _build_request_payload(
-                template_request, target, rs, output_token_override
-            )
+            with rs_lock:
+                request_payload, _ = _build_request_payload(
+                    template_request,
+                    target,
+                    rs,
+                    per_request_override,
+                    exact_output_tokens=exact_output_tokens,
+                )
 
             if target == "vllm":
                 headers = {"User-Agent": "fmaas-load-test"}
