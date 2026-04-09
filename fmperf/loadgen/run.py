@@ -133,6 +133,27 @@ def run(result_filename=None):
         except ValueError:
             return None
 
+    def _discover_model_from_url(url, timeout_seconds):
+        response = requests.get(
+            "http://%s/v1/models" % (url),
+            timeout=timeout_seconds,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Model discovery failed with status {response.status_code}: {response.text}"
+            )
+
+        payload = response.json()
+        models = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(models, list) or len(models) == 0:
+            raise RuntimeError("Model discovery returned an empty model list")
+
+        model_id = models[0].get("id") if isinstance(models[0], dict) else None
+        if not model_id:
+            raise RuntimeError("Model discovery did not return a valid model id")
+
+        return str(model_id)
+
     def _get_output_token_override_bounds():
         min_value = _parse_int_env("MIN_OUTPUT_TOKENS")
         max_value = _parse_int_env("MAX_OUTPUT_TOKENS")
@@ -180,9 +201,18 @@ def run(result_filename=None):
     outfile = os.path.join(REQUESTS_DIR, result_filename)
     target = os.environ["TARGET"]
     api_url = os.environ["URL"]
-    active_model = os.environ.get("MODEL", "").strip()
-    if target == "vllm" and not active_model:
-        raise ValueError("MODEL environment variable is required when TARGET=vllm")
+    model_discovery_timeout = float(os.environ.get("MODEL_DISCOVERY_TIMEOUT", "10"))
+
+    # Discover the model directly from the endpoint before starting the experiment.
+    # If discovery fails, abort early as requested.
+    try:
+        active_model = _discover_model_from_url(api_url, model_discovery_timeout)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to discover model from URL '{api_url}'. Aborting experiment early."
+        ) from exc
+
+    print(f">> Discovered model from endpoint: {active_model}")
     req_min = float(os.environ["REQ_MIN"])  # Changed from int() to float() to allow non-integer values
     duration = Duration(os.environ["DURATION"])
     backoff = Duration(os.environ["BACKOFF"])
