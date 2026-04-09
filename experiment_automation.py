@@ -691,9 +691,14 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         set_process_env_for_run(req_min)
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
-        evaluation_result, responded_per_min = run_evaluation_pipeline(
-            model, gpus, cpus, node, stage, parent_dir, experiment_type
-        )
+        try:
+            evaluation_result, responded_per_min = run_evaluation_pipeline(
+                model, gpus, cpus, node, stage, parent_dir, experiment_type
+            )
+        except RuntimeError as exc:
+            reason = str(exc)
+            print(f"Controlled stop: terminating experiment early due to fatal pipeline error: {reason}")
+            return {"aborted": True, "reason": reason}
         # Capture the REQ_MIN used for this evaluation before any update logic
         req_min_used = req_min
         median_resp_tokens, total_completed_requests = _compute_median_response_tokens()
@@ -846,6 +851,10 @@ def main():
         
         result = run_experiment_for_tokens(tokens, initial_req_min)
         results[f"{tokens[0]}_{tokens[1]}"] = result
+
+        if isinstance(result, dict) and result.get("aborted"):
+            print("Aborted remaining experiments after fatal pipeline error.")
+            break
         
         print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
         print(f"Result: {result}")
@@ -859,5 +868,8 @@ def main():
     return results
 
 if __name__ == "__main__":
-    results = main()
-    print(f"Final results: {results}")
+    try:
+        results = main()
+        print(f"Final results: {results}")
+    except Exception as exc:
+        print(f"Controlled stop: {exc}")

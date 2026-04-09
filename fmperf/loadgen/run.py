@@ -1,6 +1,7 @@
 import time
 import copy
 import requests
+import sys
 from typing import Iterable, List
 import json
 import pandas as pd
@@ -17,6 +18,10 @@ from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILE
 import threading
 import itertools
 import math
+
+
+class ModelDiscoveryError(RuntimeError):
+    """Raised when runtime model discovery from endpoint fails."""
 
 
 def run(result_filename=None):
@@ -139,18 +144,18 @@ def run(result_filename=None):
             timeout=timeout_seconds,
         )
         if response.status_code != 200:
-            raise RuntimeError(
+            raise ModelDiscoveryError(
                 f"Model discovery failed with status {response.status_code}: {response.text}"
             )
 
         payload = response.json()
         models = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(models, list) or len(models) == 0:
-            raise RuntimeError("Model discovery returned an empty model list")
+            raise ModelDiscoveryError("Model discovery returned an empty model list")
 
         model_id = models[0].get("id") if isinstance(models[0], dict) else None
         if not model_id:
-            raise RuntimeError("Model discovery did not return a valid model id")
+            raise ModelDiscoveryError("Model discovery did not return a valid model id")
 
         return str(model_id)
 
@@ -208,7 +213,7 @@ def run(result_filename=None):
     try:
         active_model = _discover_model_from_url(api_url, model_discovery_timeout)
     except Exception as exc:
-        raise RuntimeError(
+        raise ModelDiscoveryError(
             f"Unable to discover model from URL '{api_url}'. Aborting experiment early."
         ) from exc
 
@@ -509,4 +514,8 @@ def run(result_filename=None):
 
 
 if __name__ == "__main__":
-    parse_results(run(), print_df=True)
+    try:
+        parse_results(run(), print_df=True)
+    except ModelDiscoveryError as exc:
+        print(f"Controlled stop: {exc}")
+        sys.exit(2)
