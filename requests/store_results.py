@@ -145,50 +145,6 @@ def _extract_median_tokens_from_log(slurm_path: str | None) -> str | None:
     except Exception:
         return None
 
-def _read_prompt_info(sample_path: Path) -> tuple[str | None, str | None]:
-    """Return (prompt_text, prompt_token_count) from sample_requests.json if available."""
-    if not sample_path.exists():
-        alt = Path("..") / sample_path.name
-        if not alt.exists():
-            return None, None
-        sample_path = alt
-    try:
-        data = json.loads(sample_path.read_text(encoding="utf-8"))
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            # try common container keys
-            for key in ("requests", "data", "items"):
-                if isinstance(data.get(key), list):
-                    items = data[key]
-                    break
-            if not items:
-                items = [data]
-
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            # prompt text keys in order of likelihood
-            for tkey in ("prompt", "text", "inputs", "input", "query"):
-                if isinstance(it.get(tkey), str) and it.get(tkey).strip():
-                    prompt_text = it.get(tkey).strip()
-                    break
-            else:
-                prompt_text = None
-
-            # token count keys seen in generators
-            for k in ("prompt_token_count", "input_token_count", "prompt_len", "input_tokens"):
-                v = it.get(k)
-                if isinstance(v, (int, float, str)):
-                    return prompt_text, str(v)
-            # If not present, still return text (count unknown)
-            if prompt_text:
-                return prompt_text, None
-        return None, None
-    except Exception:
-        return None, None
-
 def _to_float(value) -> float | None:
     if isinstance(value, (int, float)):
         try:
@@ -741,8 +697,8 @@ def main():
         
         # Parse CLI arguments from experiment_automation.py.
         # Supported formats:
-        # - Compact (current): model, stage, parent_dir, in_range, out_range, req_min, evaluation, [median], [prompt_token_count]
-        # - Legacy:            model, gpus, cpus, node, stage, parent_dir, in_range, out_range, req_min, evaluation, [median], [prompt_token_count]
+        # - Compact (current): model, stage, parent_dir, in_range, out_range, req_min, evaluation, [median]
+        # - Legacy:            model, gpus, cpus, node, stage, parent_dir, in_range, out_range, req_min, evaluation, [median]
         args = sys.argv[1:]
         is_compact_cli = len(args) >= 7 and ('_' in str(args[2]) or '/' in str(args[2]) or '\\' in str(args[2]))
 
@@ -758,7 +714,6 @@ def main():
         req_min = ''
         evaluation_flag = ''
         median_cli = ''
-        prompt_token_count_cli = ''  # deprecated: will use median over prompts
 
         if is_compact_cli:
             model = args[0]
@@ -777,8 +732,6 @@ def main():
             evaluation_flag = args[6]
             if len(args) >= 8:
                 median_cli = args[7]
-            if len(args) >= 9:
-                prompt_token_count_cli = args[8]
         elif len(args) >= 10:
             # Backward-compatible parsing for legacy positional arguments.
             model = args[0]
@@ -797,8 +750,6 @@ def main():
             evaluation_flag = args[9]
             if len(args) >= 11:
                 median_cli = args[10]
-            if len(args) >= 12:
-                prompt_token_count_cli = args[11]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -807,7 +758,6 @@ def main():
             max_output_tokens = os.environ.get('MAX_OUTPUT_TOKENS', '')
             req_min = os.environ.get('REQ_MIN', '')
             evaluation_flag = os.environ.get('EVALUATION', '')
-            prompt_token_count_cli = os.environ.get('PROMPT_TOKEN_COUNT', '')
 
         # Create the full directory path
         if parent_dir:
@@ -873,7 +823,7 @@ def main():
         additive_true_proportions = (os.environ.get('ADDITIVE_TRUE_PROPORTIONS') or '').strip()
 
         # Prompt token count: use median across prompts in requests
-        prompt_token_count = _compute_median_prompt_tokens() or (prompt_token_count_cli or '').strip()
+        prompt_token_count = _compute_median_prompt_tokens()
 
         # Job ID and Slurm model extraction
         job_id_env = os.environ.get('SLURM_JOB_ID')
