@@ -162,12 +162,36 @@ def _read_env_value(env_path, key, default=''):
                 s = line.strip()
                 if not s or s.startswith('#') or '=' not in s:
                     continue
+                if s.startswith('export '):
+                    s = s[len('export '):].strip()
                 k, v = s.split('=', 1)
                 if k.strip() == key:
-                    return v.strip()
+                    return v.strip().strip('"').strip("'")
     except Exception:
         pass
     return default
+
+
+def _normalize_endpoint_value(value):
+    if value is None:
+        return ''
+    return str(value).strip().strip('"').strip("'")
+
+
+def _model_hint_from_endpoint_value(value):
+    endpoint = _normalize_endpoint_value(value)
+    if not endpoint:
+        return ''
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        path = (parsed.path or '').strip('/')
+        if path:
+            parts = [p for p in path.split('/') if p and p not in ('v1', 'chat', 'completions', 'generate', 'models')]
+            if parts:
+                return parts[-1]
+        host = parsed.netloc.split(':', 1)[0].strip()
+        return host
+    return endpoint
 
 
 def _extract_model_from_payload(payload):
@@ -235,9 +259,14 @@ def _build_model_probe_urls(url):
 
 
 def _extract_model_from_url(url, timeout_seconds=5.0):
-    if not url:
+    endpoint = _normalize_endpoint_value(url)
+    if not endpoint:
         return ''
-    for probe_url in _build_model_probe_urls(url):
+    # If this is not a full URL (e.g., service/model name), use it directly as model hint.
+    if not urllib.parse.urlparse(endpoint).scheme:
+        return _model_hint_from_endpoint_value(endpoint)
+
+    for probe_url in _build_model_probe_urls(endpoint):
         try:
             req = urllib.request.Request(
                 probe_url,
@@ -686,10 +715,25 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     print(f"Stored configuration - MODEL: {model}")
 
     # Resolve model once per token experiment to avoid repeated URL probing downstream.
-    model_from_url = _extract_model_from_url(os.environ.get('URL', '').strip())
+    endpoint_candidates = [
+        os.environ.get('URL', ''),
+        os.environ.get('FMPERF_ENDPOINT_URL', ''),
+        os.environ.get('ENDPOINT_URL', ''),
+        _read_env_value(Path('.env'), 'URL', ''),
+        _read_env_value(Path('.env'), 'FMPERF_ENDPOINT_URL', ''),
+    ]
+    model_from_url = ''
+    for endpoint_value in endpoint_candidates:
+        model_from_url = _extract_model_from_url(endpoint_value)
+        if model_from_url:
+            break
     if not model_from_url:
-        url_from_env_file = _read_env_value(Path('.env'), 'URL', '')
-        model_from_url = _extract_model_from_url(url_from_env_file)
+        # Last resort: endpoint value itself can still be informative.
+        for endpoint_value in endpoint_candidates:
+            hint = _model_hint_from_endpoint_value(endpoint_value)
+            if hint:
+                model_from_url = hint
+                break
     if model_from_url:
         os.environ['MODEL_USED_RESOLVED'] = model_from_url
         print(f"Resolved model from URL metadata: {model_from_url}")

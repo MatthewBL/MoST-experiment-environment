@@ -21,11 +21,38 @@ def _read_env_value(env_path: Path, key: str, default: str = "") -> str:
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
+                    if line.startswith("export "):
+                        line = line[len("export "):].strip()
                     if line.startswith(key + "="):
-                        return line.split("=", 1)[1]
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception:
         pass
     return default
+
+
+def _normalize_endpoint_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().strip('"').strip("'")
+
+
+def _model_hint_from_endpoint_value(value: str | None) -> str:
+    endpoint = _normalize_endpoint_value(value)
+    if not endpoint:
+        return ""
+
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        path = (parsed.path or "").strip("/")
+        if path:
+            parts = [p for p in path.split("/") if p and p not in ("v1", "chat", "completions", "generate", "models")]
+            if parts:
+                return parts[-1]
+        host = parsed.netloc.split(":", 1)[0].strip()
+        return host
+
+    # Plain identifier like service/model name.
+    return endpoint
 
 def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     """Return (job_id, slurm_log_path) if found.
@@ -202,10 +229,16 @@ def _build_model_probe_urls(url: str) -> list[str]:
 
 def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> str:
     """Fetch model name from URL by probing common metadata endpoints."""
-    if not url:
+    endpoint = _normalize_endpoint_value(url)
+    if not endpoint:
         return ""
 
-    for probe_url in _build_model_probe_urls(url):
+    # If endpoint is not an absolute URL, treat it as a direct model/service hint.
+    parsed = urllib.parse.urlparse(endpoint)
+    if not parsed.scheme:
+        return _model_hint_from_endpoint_value(endpoint)
+
+    for probe_url in _build_model_probe_urls(endpoint):
         try:
             req = urllib.request.Request(
                 probe_url,
@@ -928,14 +961,33 @@ def main():
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
 
         # Endpoint URL used for this run
-        url = (os.environ.get('URL') or '').strip()
-        if not url:
-            url = _read_env_value(Path('..') / '.env', 'URL', '')
+        endpoint_candidates = [
+            os.environ.get('URL', ''),
+            os.environ.get('FMPERF_ENDPOINT_URL', ''),
+            os.environ.get('ENDPOINT_URL', ''),
+            _read_env_value(Path('..') / '.env', 'URL', ''),
+            _read_env_value(Path('..') / '.env', 'FMPERF_ENDPOINT_URL', ''),
+        ]
+        url = ''
+        for endpoint_value in endpoint_candidates:
+            normalized = _normalize_endpoint_value(endpoint_value)
+            if normalized:
+                url = normalized
+                break
 
         # Resolve model from endpoint metadata when possible.
         model_from_url = ''
         if not (resolved_model_cli or '').strip():
-            model_from_url = _extract_model_from_url(url)
+            for endpoint_value in endpoint_candidates:
+                model_from_url = _extract_model_from_url(endpoint_value)
+                if model_from_url:
+                    break
+            if not model_from_url:
+                for endpoint_value in endpoint_candidates:
+                    hint = _model_hint_from_endpoint_value(endpoint_value)
+                    if hint:
+                        model_from_url = hint
+                        break
 
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens()
