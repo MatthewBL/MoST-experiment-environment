@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import json
+import math
 import shutil
 import sys
 from datetime import datetime
@@ -188,14 +189,151 @@ def _read_prompt_info(sample_path: Path) -> tuple[str | None, str | None]:
     except Exception:
         return None, None
 
-def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str | None, str | None]:
-    """Compute (median_response_tokens, total_requests, success_rate) from results/output CSV/JSON.
-    - total_requests: unique requests inferred from response_idx resets or request_idx values.
-    - success_rate: best-effort read from output.csv if a column with 'success' exists.
-    """
-    median_tokens = None
-    total_requests = None
-    success_rate = None
+def _to_float(value) -> float | None:
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+    return None
+
+
+def _to_int(value) -> int | None:
+    fv = _to_float(value)
+    if fv is None:
+        return None
+    try:
+        return int(fv)
+    except Exception:
+        return None
+
+
+def _format_number(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    try:
+        v = float(value)
+    except Exception:
+        return ""
+    if math.isfinite(v) and float(v).is_integer():
+        return str(int(v))
+    return f"{v:.6f}".rstrip("0").rstrip(".")
+
+
+def _population_variance(values: list[float]) -> float | None:
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    return sum((v - mean) ** 2 for v in values) / len(values)
+
+
+def _percentile(values_sorted: list[float], percentile: float) -> float | None:
+    if not values_sorted:
+        return None
+    if len(values_sorted) == 1:
+        return values_sorted[0]
+    p = max(0.0, min(100.0, float(percentile)))
+    pos = (p / 100.0) * (len(values_sorted) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return values_sorted[lo]
+    frac = pos - lo
+    return values_sorted[lo] + (values_sorted[hi] - values_sorted[lo]) * frac
+
+
+def _serialize_percentiles(values: list[float]) -> str:
+    if not values:
+        return ""
+    vals = sorted(values)
+    pts = {
+        "p50": _percentile(vals, 50),
+        "p75": _percentile(vals, 75),
+        "p90": _percentile(vals, 90),
+        "p95": _percentile(vals, 95),
+        "p99": _percentile(vals, 99),
+    }
+    clean = {k: float(_format_number(v)) for k, v in pts.items() if v is not None}
+    return json.dumps(clean, separators=(",", ":"), ensure_ascii=True)
+
+
+def _load_prompt_tokens_by_sample_idx() -> dict[int, float]:
+    out: dict[int, float] = {}
+    req_path = _find_requests_file()
+    if not req_path:
+        return out
+    try:
+        payload = json.loads(req_path.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+
+    if isinstance(payload, dict):
+        items = payload.get("requests") or payload.get("data") or payload.get("items") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+
+    for idx, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        raw = it.get("prompt_token_count")
+        if raw is None:
+            raw = it.get("input_token_count")
+        if raw is None:
+            raw = it.get("prompt_len")
+        if raw is None:
+            raw = it.get("input_tokens")
+        if raw is None and isinstance(it.get("config"), dict):
+            raw = it["config"].get("in_tokens")
+        fv = _to_float(raw)
+        if fv is not None and fv >= 0:
+            out[idx] = fv
+    return out
+
+
+def _parse_numeric_bounds(min_value: str | None, max_value: str | None) -> tuple[float | None, float | None]:
+    lo = _to_float(min_value)
+    hi = _to_float(max_value)
+    if lo is None and hi is None:
+        return None, None
+    if lo is None:
+        lo = hi
+    if hi is None:
+        hi = lo
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def _compute_request_token_stats(
+    results_path: Path,
+    expected_min_output: float | None,
+    expected_max_output: float | None,
+) -> dict[str, str | None]:
+    """Compute output/input token statistics and interval compliance from results.json."""
+    out: dict[str, str | None] = {
+        "median_response_tokens": None,
+        "total_requests": None,
+        "success_rate": None,
+        "responses_within_interval": None,
+        "responses_outside_interval": None,
+        "avg_tokens_per_request": None,
+        "avg_tokens_per_response": None,
+        "input_token_variance": None,
+        "output_token_variance": None,
+        "input_token_percentiles": None,
+        "output_token_percentiles": None,
+        "request_total_token_percentiles": None,
+    }
 
     # success rate from output.csv if present
     try:
@@ -205,42 +343,27 @@ def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str
                 reader = csv.DictReader(f)
                 row = next(reader, None)
                 if row:
-                    # direct median columns if present
-                    for k in row.keys():
-                        kl = k.lower()
-                        if "median" in kl and "token" in kl:
-                            try:
-                                val = str(row.get(k, ""))
-                                if val:
-                                    median_tokens = val
-                            except Exception:
-                                pass
-                    # prioritize fields named like success_rate/ratio
-                    def find_col(cols: list[str]) -> str | None:
-                        for c in cols:
-                            if c in row:
-                                return c
-                        return None
-                    # try exact/common names
-                    col = find_col([
-                        "success_rate", "success_ratio", "success", "pass_rate", "accuracy"
-                    ])
+                    col = None
+                    for c in ("success_rate", "success_ratio", "success", "pass_rate", "accuracy"):
+                        if c in row:
+                            col = c
+                            break
                     if not col:
-                        # case-insensitive contains 'success'
                         for k in row.keys():
                             if "success" in k.lower():
                                 col = k
                                 break
                     if col:
-                        success_rate = str(row.get(col, ""))
+                        out["success_rate"] = str(row.get(col, "") or "")
     except Exception:
         pass
 
-    # Compute tokens and requests from results.json if available
+    request_entries: dict[tuple[int | None, int | None], dict[str, float | int | None]] = {}
+
+    # Compute request-level output lengths from results.json if available
     try:
         if results_path.exists():
             data = json.loads(results_path.read_text(encoding="utf-8"))
-            # Normalize iterable of events or responses
             if isinstance(data, dict) and isinstance(data.get("results"), list):
                 items = data["results"]
             elif isinstance(data, list):
@@ -248,54 +371,81 @@ def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str
             else:
                 items = []
 
-            # Track per-request max response_idx
-            max_resp_idx: dict[tuple[int | None, int | None], int] = {}
-            # Fallback request sequencing if request_idx missing
             current_rid = -1
-
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                rid = it.get("request_idx")
-                wid = it.get("worker_idx")
-                rsi = it.get("response_idx")
 
-                # derive rid when missing: response_idx==0 indicates new request
+                rid = _to_int(it.get("request_idx"))
+                wid = _to_int(it.get("worker_idx"))
+                rsi = _to_int(it.get("response_idx"))
+                n_tokens = _to_float(it.get("n_tokens"))
+                sample_idx = _to_int(it.get("sample_idx"))
+
+                # Fallback request derivation when request_idx is missing.
                 if rid is None:
-                    if isinstance(rsi, (int, float)) and int(rsi) == 0:
+                    if rsi is not None and rsi == 0:
                         current_rid += 1
                     if current_rid < 0:
                         current_rid = 0
                     rid = current_rid
 
-                key = (int(wid) if isinstance(wid, (int, float, str)) and str(wid).isdigit() else None,
-                       int(rid) if isinstance(rid, (int, float, str)) and str(rid).lstrip("-+").isdigit() else None)
+                key = (wid, rid)
+                if key not in request_entries:
+                    request_entries[key] = {
+                        "token_sum": 0.0,
+                        "max_response_idx": -1,
+                        "sample_idx": sample_idx,
+                    }
 
-                if isinstance(rsi, (int, float, str)):
-                    try:
-                        val = int(float(rsi))
-                        prev = max_resp_idx.get(key, -1)
-                        if val > prev:
-                            max_resp_idx[key] = val
-                    except Exception:
-                        pass
-
-            if max_resp_idx:
-                # token count per request = max response_idx + 1
-                token_counts = [v + 1 for v in max_resp_idx.values() if isinstance(v, int) and v >= 0]
-                if token_counts:
-                    token_counts.sort()
-                    n = len(token_counts)
-                    if n % 2 == 1:
-                        median_tokens = str(token_counts[n // 2])
-                    else:
-                        median_tokens = str((token_counts[n // 2 - 1] + token_counts[n // 2]) / 2)
-                total_requests = str(len(max_resp_idx))
+                rec = request_entries[key]
+                if sample_idx is not None and rec.get("sample_idx") is None:
+                    rec["sample_idx"] = sample_idx
+                if n_tokens is not None and n_tokens > 0:
+                    rec["token_sum"] = float(rec.get("token_sum", 0.0) or 0.0) + n_tokens
+                if rsi is not None:
+                    prev = int(rec.get("max_response_idx", -1) or -1)
+                    if rsi > prev:
+                        rec["max_response_idx"] = rsi
     except Exception:
         pass
 
+    output_tokens_per_request: list[float] = []
+    request_sample_indices: list[int | None] = []
+    if request_entries:
+        for rec in request_entries.values():
+            token_sum = _to_float(rec.get("token_sum")) or 0.0
+            max_idx = _to_int(rec.get("max_response_idx"))
+            if token_sum > 0:
+                out_len = token_sum
+            elif max_idx is not None and max_idx >= 0:
+                out_len = float(max_idx + 1)
+            else:
+                out_len = 0.0
+            output_tokens_per_request.append(out_len)
+            request_sample_indices.append(_to_int(rec.get("sample_idx")))
+
+    if output_tokens_per_request:
+        sorted_out = sorted(output_tokens_per_request)
+        out["median_response_tokens"] = _format_number(_percentile(sorted_out, 50))
+        out["total_requests"] = str(len(output_tokens_per_request))
+        out["avg_tokens_per_response"] = _format_number(sum(output_tokens_per_request) / len(output_tokens_per_request))
+        out["output_token_variance"] = _format_number(_population_variance(output_tokens_per_request))
+        out["output_token_percentiles"] = _serialize_percentiles(output_tokens_per_request)
+
+        if expected_min_output is not None or expected_max_output is not None:
+            within = 0
+            for out_len in output_tokens_per_request:
+                ok_lo = expected_min_output is None or out_len >= expected_min_output
+                ok_hi = expected_max_output is None or out_len <= expected_max_output
+                if ok_lo and ok_hi:
+                    within += 1
+            outside = len(output_tokens_per_request) - within
+            out["responses_within_interval"] = str(within)
+            out["responses_outside_interval"] = str(outside)
+
     # If results.json unavailable, attempt to derive total from first/second_half.csv
-    if total_requests is None:
+    if out["total_requests"] is None:
         try:
             fh = Path("first_half.csv")
             sh = Path("second_half.csv")
@@ -305,15 +455,39 @@ def _compute_median_response_tokens(results_path: Path) -> tuple[str | None, str
                     with p.open("r", encoding="utf-8", newline="") as f:
                         reader = csv.reader(f)
                         rows = list(reader)
-                        # naive: subtract header
                         if rows:
                             count += max(0, len(rows) - 1)
             if count:
-                total_requests = str(count)
+                out["total_requests"] = str(count)
         except Exception:
             pass
 
-    return median_tokens, total_requests, success_rate
+    prompt_tokens_by_idx = _load_prompt_tokens_by_sample_idx()
+    if request_sample_indices and prompt_tokens_by_idx:
+        input_tokens_per_request: list[float] = []
+        total_tokens_per_request: list[float] = []
+        for i, sample_idx in enumerate(request_sample_indices):
+            if sample_idx is None:
+                continue
+            input_tokens = prompt_tokens_by_idx.get(sample_idx)
+            if input_tokens is None:
+                continue
+            input_tokens_per_request.append(input_tokens)
+            if i < len(output_tokens_per_request):
+                total_tokens_per_request.append(input_tokens + output_tokens_per_request[i])
+
+        if input_tokens_per_request:
+            out["input_token_variance"] = _format_number(_population_variance(input_tokens_per_request))
+            out["input_token_percentiles"] = _serialize_percentiles(input_tokens_per_request)
+        if total_tokens_per_request:
+            out["avg_tokens_per_request"] = _format_number(sum(total_tokens_per_request) / len(total_tokens_per_request))
+            out["request_total_token_percentiles"] = _serialize_percentiles(total_tokens_per_request)
+
+    # Fallback for avg tokens/request if input tokens are not available.
+    if out["avg_tokens_per_request"] is None:
+        out["avg_tokens_per_request"] = out["avg_tokens_per_response"]
+
+    return out
 
 def _parse_range(value: str | None) -> tuple[str | None, str | None]:
     """Parse a token range string like '32-64' or '32' into (min,max) strings.
@@ -646,6 +820,8 @@ def main():
                         req_min = line.split('=', 1)[1]
                     elif evaluation_flag == '' and line.startswith('EVALUATION='):
                         evaluation_flag = line.split('=', 1)[1]
+
+        expected_min_output, expected_max_output = _parse_numeric_bounds(min_output_tokens, max_output_tokens)
         
         # Evaluation: use explicit flag from CLI/env; also attempt to read success rate from output.csv
         evaluation = (evaluation_flag or '').strip()
@@ -671,6 +847,10 @@ def main():
         # Duration from .env
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
 
+        # Additive proportion telemetry (JSON strings keyed by token interval label)
+        additive_expected_proportions = (os.environ.get('ADDITIVE_EXPECTED_PROPORTIONS') or '').strip()
+        additive_true_proportions = (os.environ.get('ADDITIVE_TRUE_PROPORTIONS') or '').strip()
+
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens() or (prompt_token_count_cli or '').strip()
 
@@ -685,11 +865,24 @@ def main():
         if median_resp_tokens is None:
             log_median = _extract_median_tokens_from_log(slurm_path)
             median_resp_tokens = log_median if log_median else None
-        comp_median, total_requests, sr_from_results = _compute_median_response_tokens(Path('results.json'))
+        stats = _compute_request_token_stats(Path('results.json'), expected_min_output, expected_max_output)
+        comp_median = stats.get("median_response_tokens")
+        total_requests = stats.get("total_requests")
+        sr_from_results = stats.get("success_rate")
         if median_resp_tokens is None:
             median_resp_tokens = comp_median
         if not success_rate and sr_from_results:
             success_rate = sr_from_results
+
+        responses_within_interval = stats.get("responses_within_interval")
+        responses_outside_interval = stats.get("responses_outside_interval")
+        avg_tokens_per_request = stats.get("avg_tokens_per_request")
+        avg_tokens_per_response = stats.get("avg_tokens_per_response")
+        input_token_variance = stats.get("input_token_variance")
+        output_token_variance = stats.get("output_token_variance")
+        input_token_percentiles = stats.get("input_token_percentiles")
+        output_token_percentiles = stats.get("output_token_percentiles")
+        request_total_token_percentiles = stats.get("request_total_token_percentiles")
 
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
@@ -702,7 +895,12 @@ def main():
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
                 "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
-                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE"
+                "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
+                "RESPONSES_WITHIN_EXPECTED_INTERVAL", "RESPONSES_OUTSIDE_EXPECTED_INTERVAL",
+                "AVG_TOKENS_PER_REQUEST", "AVG_TOKENS_PER_RESPONSE",
+                "INPUT_TOKEN_VARIANCE", "OUTPUT_TOKEN_VARIANCE",
+                "INPUT_TOKEN_PERCENTILES", "OUTPUT_TOKEN_PERCENTILES", "REQUEST_TOTAL_TOKEN_PERCENTILES",
+                "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS"
             ])
             # Write data row
             writer.writerow([
@@ -719,7 +917,18 @@ def main():
                 prompt_token_count or '',
                 median_resp_tokens or '',
                 job_id or '',
-                stage
+                stage,
+                responses_within_interval or '',
+                responses_outside_interval or '',
+                avg_tokens_per_request or '',
+                avg_tokens_per_response or '',
+                input_token_variance or '',
+                output_token_variance or '',
+                input_token_percentiles or '',
+                output_token_percentiles or '',
+                request_total_token_percentiles or '',
+                additive_expected_proportions,
+                additive_true_proportions
             ])
         
         print(f"Created results.csv in {full_dir_path}")
