@@ -5,6 +5,9 @@ import json
 import math
 import shutil
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -125,6 +128,111 @@ def _extract_model_from_slurm(slurm_path: str | None) -> str:
                         return val
     except Exception:
         pass
+    return ""
+
+
+def _extract_model_from_payload(payload) -> str:
+    """Best-effort model extraction from common API payload shapes."""
+    if isinstance(payload, dict):
+        for key in ("model", "model_name", "name", "id"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+        data = payload.get("data")
+        if isinstance(data, list):
+            for item in data:
+                model = _extract_model_from_payload(item)
+                if model:
+                    return model
+
+        models = payload.get("models")
+        if isinstance(models, list):
+            for item in models:
+                model = _extract_model_from_payload(item)
+                if model:
+                    return model
+
+    if isinstance(payload, list):
+        for item in payload:
+            model = _extract_model_from_payload(item)
+            if model:
+                return model
+
+    return ""
+
+
+def _build_model_probe_urls(url: str) -> list[str]:
+    """Build likely model-discovery URLs from an inference endpoint URL."""
+    if not url:
+        return []
+
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+
+    original = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    path = parsed.path.rstrip("/")
+
+    candidate_paths = [path]
+    if path.endswith("/chat/completions"):
+        candidate_paths.append(path[: -len("/chat/completions")] + "/models")
+    if path.endswith("/completions"):
+        candidate_paths.append(path[: -len("/completions")] + "/models")
+    if path.endswith("/generate"):
+        candidate_paths.append(path[: -len("/generate")] + "/info")
+
+    # Also probe conventional OpenAI/TGI-compatible paths.
+    candidate_paths.extend(["/v1/models", "/models", "/info"])
+
+    seen = set()
+    urls = []
+    for p in candidate_paths:
+        normalized = p if p.startswith("/") else "/" + p
+        full = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, normalized, "", "", ""))
+        if full not in seen:
+            seen.add(full)
+            urls.append(full)
+
+    if original not in seen:
+        urls.insert(0, original)
+
+    return urls
+
+
+def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> str:
+    """Fetch model name from URL by probing common metadata endpoints."""
+    if not url:
+        return ""
+
+    for probe_url in _build_model_probe_urls(url):
+        try:
+            req = urllib.request.Request(
+                probe_url,
+                headers={"Accept": "application/json", "User-Agent": "store-results/1.0"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                raw = resp.read()
+
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+
+            try:
+                payload = json.loads(text)
+            except Exception:
+                continue
+
+            model = _extract_model_from_payload(payload)
+            if model:
+                return model
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            continue
+        except Exception:
+            continue
+
     return ""
 
 def _extract_median_tokens_from_log(slurm_path: str | None) -> str | None:
@@ -714,6 +822,7 @@ def main():
         req_min = ''
         evaluation_flag = ''
         median_cli = ''
+        resolved_model_cli = ''
 
         if is_compact_cli:
             model = args[0]
@@ -732,6 +841,8 @@ def main():
             evaluation_flag = args[6]
             if len(args) >= 8:
                 median_cli = args[7]
+            if len(args) >= 9:
+                resolved_model_cli = args[8]
         elif len(args) >= 10:
             # Backward-compatible parsing for legacy positional arguments.
             model = args[0]
@@ -750,6 +861,8 @@ def main():
             evaluation_flag = args[9]
             if len(args) >= 11:
                 median_cli = args[10]
+            if len(args) >= 12:
+                resolved_model_cli = args[11]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -758,6 +871,7 @@ def main():
             max_output_tokens = os.environ.get('MAX_OUTPUT_TOKENS', '')
             req_min = os.environ.get('REQ_MIN', '')
             evaluation_flag = os.environ.get('EVALUATION', '')
+            resolved_model_cli = os.environ.get('MODEL_USED_RESOLVED', '')
 
         # Create the full directory path
         if parent_dir:
@@ -818,6 +932,11 @@ def main():
         if not url:
             url = _read_env_value(Path('..') / '.env', 'URL', '')
 
+        # Resolve model from endpoint metadata when possible.
+        model_from_url = ''
+        if not (resolved_model_cli or '').strip():
+            model_from_url = _extract_model_from_url(url)
+
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens()
 
@@ -871,7 +990,7 @@ def main():
             ])
             # Write data row
             writer.writerow([
-                model_from_slurm or model,
+                (resolved_model_cli or '').strip() or model_from_url or model_from_slurm or model,
                 min_input_tokens,
                 max_input_tokens,
                 min_output_tokens,

@@ -4,6 +4,9 @@ import os
 import re
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
@@ -147,6 +150,112 @@ _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>[smhdSMHD]?)$
 MIT_PLATEAU_REL_TOL = float(os.environ.get('MIT_PLATEAU_REL_TOL', '0.01'))
 MIT_PLATEAU_ABS_TOL = float(os.environ.get('MIT_PLATEAU_ABS_TOL', '0.5'))
 SUCCESS_RATE_THRESHOLD = float(os.environ.get('SUCCESS_RATE_THRESHOLD', '95.0'))
+
+
+def _read_env_value(env_path, key, default=''):
+    try:
+        path = Path(env_path)
+        if not path.exists():
+            return default
+        with path.open('r', encoding='utf-8') as handle:
+            for line in handle:
+                s = line.strip()
+                if not s or s.startswith('#') or '=' not in s:
+                    continue
+                k, v = s.split('=', 1)
+                if k.strip() == key:
+                    return v.strip()
+    except Exception:
+        pass
+    return default
+
+
+def _extract_model_from_payload(payload):
+    if isinstance(payload, dict):
+        for key in ('model', 'model_name', 'name', 'id'):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+        data = payload.get('data')
+        if isinstance(data, list):
+            for item in data:
+                model = _extract_model_from_payload(item)
+                if model:
+                    return model
+
+        models = payload.get('models')
+        if isinstance(models, list):
+            for item in models:
+                model = _extract_model_from_payload(item)
+                if model:
+                    return model
+
+    if isinstance(payload, list):
+        for item in payload:
+            model = _extract_model_from_payload(item)
+            if model:
+                return model
+
+    return ''
+
+
+def _build_model_probe_urls(url):
+    if not url:
+        return []
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+
+    original = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+    path = parsed.path.rstrip('/')
+
+    candidate_paths = [path]
+    if path.endswith('/chat/completions'):
+        candidate_paths.append(path[:-len('/chat/completions')] + '/models')
+    if path.endswith('/completions'):
+        candidate_paths.append(path[:-len('/completions')] + '/models')
+    if path.endswith('/generate'):
+        candidate_paths.append(path[:-len('/generate')] + '/info')
+
+    candidate_paths.extend(['/v1/models', '/models', '/info'])
+
+    seen = set()
+    urls = []
+    for p in candidate_paths:
+        normalized = p if p.startswith('/') else '/' + p
+        full = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, normalized, '', '', ''))
+        if full not in seen:
+            seen.add(full)
+            urls.append(full)
+
+    if original and original not in seen:
+        urls.insert(0, original)
+    return urls
+
+
+def _extract_model_from_url(url, timeout_seconds=5.0):
+    if not url:
+        return ''
+    for probe_url in _build_model_probe_urls(url):
+        try:
+            req = urllib.request.Request(
+                probe_url,
+                headers={'Accept': 'application/json', 'User-Agent': 'experiment-automation/1.0'},
+                method='GET',
+            )
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                raw = resp.read()
+            text = raw.decode('utf-8', errors='replace')
+            payload = json.loads(text)
+            model = _extract_model_from_payload(payload)
+            if model:
+                return model
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            continue
+        except Exception:
+            continue
+    return ''
 
 
 def _normalize_experiment_type(value):
@@ -575,6 +684,15 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         print("Warning: Unable to determine experiment duration; MIT throughput checks may be unavailable.")
     
     print(f"Stored configuration - MODEL: {model}")
+
+    # Resolve model once per token experiment to avoid repeated URL probing downstream.
+    model_from_url = _extract_model_from_url(os.environ.get('URL', '').strip())
+    if not model_from_url:
+        url_from_env_file = _read_env_value(Path('.env'), 'URL', '')
+        model_from_url = _extract_model_from_url(url_from_env_file)
+    if model_from_url:
+        os.environ['MODEL_USED_RESOLVED'] = model_from_url
+        print(f"Resolved model from URL metadata: {model_from_url}")
     
     # Create parent directory for this token pair
     # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
@@ -808,7 +926,8 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             store_args = [
                 "python", "-u", "store_results.py",
                 str(model), str(stage), str(parent_dir),
-                str(interval_strs[0]), str(interval_strs[1]), str(req_min_used), str(evaluation_flag), str(median_str)
+                str(interval_strs[0]), str(interval_strs[1]), str(req_min_used), str(evaluation_flag), str(median_str),
+                str(os.environ.get('MODEL_USED_RESOLVED', ''))
             ]
             print("Running (args):", " ".join(store_args))
             subprocess.run(store_args)
