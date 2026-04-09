@@ -419,9 +419,11 @@ def run(result_filename=None):
                 with progress_lock:
                     total_scheduled = sum(scheduled_by_worker.values())
                     total_inflight = sum(inflight_by_worker.values())
+                elapsed_minutes = elapsed_s / 60.0 if elapsed_s > 0 else 0.0
+                avg_sent_rpm = (total_scheduled / elapsed_minutes) if elapsed_minutes > 0 else 0.0
                 print(
                     f"[worker {wid}] remaining: {remaining_s:.1f}s "
-                    f"(elapsed: {elapsed_s:.1f}s, total reqs scheduled: {total_scheduled}, total inflight: {total_inflight})"
+                    f"(elapsed: {elapsed_s:.1f}s, total reqs scheduled: {total_scheduled}, total inflight: {total_inflight}, avg sent rpm: {avg_sent_rpm:.2f})"
                 )
                 last_log_time = now_ns
 
