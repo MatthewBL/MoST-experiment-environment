@@ -231,6 +231,10 @@ def run(result_filename=None):
     with open(infile, "rb") as f:
         sample_requests = json.load(f)
 
+    progress_lock = threading.Lock()
+    scheduled_by_worker = {}
+    inflight_by_worker = {}
+
     def worker(wid, channel, worker_req_per_sec, exp_num_users):
         rs = np.random.RandomState(seed=wid)
         rs_lock = threading.Lock()
@@ -388,6 +392,8 @@ def run(result_filename=None):
             finished = [t for t in inflight if not t.is_alive()]
             for t in finished:
                 inflight.discard(t)
+            with progress_lock:
+                inflight_by_worker[wid] = len(inflight)
 
             # Schedule a new request by starting a dedicated thread
             req_idx = next(request_counter)
@@ -395,6 +401,9 @@ def run(result_filename=None):
             th.start()
             inflight.add(th)
             requests_scheduled += 1
+            with progress_lock:
+                scheduled_by_worker[wid] = requests_scheduled
+                inflight_by_worker[wid] = len(inflight)
             
             # Compute next schedule time with jitter around the base interval
             jitter = rs.uniform(1 - jitter_range, 1 + jitter_range)
@@ -407,12 +416,20 @@ def run(result_filename=None):
             if remaining_s < 0:
                 remaining_s = 0.0
             if (now_ns - last_log_time) / 1e9 >= LOG_INTERVAL:
-                print(f"[worker {wid}] remaining: {remaining_s:.1f}s (elapsed: {elapsed_s:.1f}s, reqs scheduled: {requests_scheduled}, inflight: {len(inflight)})")
+                with progress_lock:
+                    total_scheduled = sum(scheduled_by_worker.values())
+                    total_inflight = sum(inflight_by_worker.values())
+                print(
+                    f"[worker {wid}] remaining: {remaining_s:.1f}s "
+                    f"(elapsed: {elapsed_s:.1f}s, total reqs scheduled: {total_scheduled}, total inflight: {total_inflight})"
+                )
                 last_log_time = now_ns
 
         # Wait for all in-flight request threads to finish
         for th in list(inflight):
             th.join()
+        with progress_lock:
+            inflight_by_worker[wid] = 0
 
         with open("results_wid%d" % (wid), "w") as f:
             json.dump(output, f)
