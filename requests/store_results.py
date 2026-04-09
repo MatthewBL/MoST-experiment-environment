@@ -818,10 +818,6 @@ def main():
         if not url:
             url = _read_env_value(Path('..') / '.env', 'URL', '')
 
-        # Additive proportion telemetry (JSON strings keyed by token interval label)
-        additive_expected_proportions = (os.environ.get('ADDITIVE_EXPECTED_PROPORTIONS') or '').strip()
-        additive_true_proportions = (os.environ.get('ADDITIVE_TRUE_PROPORTIONS') or '').strip()
-
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens()
 
@@ -899,8 +895,6 @@ def main():
                 input_token_percentiles or '',
                 output_token_percentiles or '',
                 request_total_token_percentiles or '',
-                additive_expected_proportions,
-                additive_true_proportions
             ])
         
         print(f"Created results.csv in {full_dir_path}")
