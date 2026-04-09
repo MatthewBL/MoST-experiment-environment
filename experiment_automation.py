@@ -331,14 +331,20 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
             ext = '.json'
         os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
 
-def run_command(command, wait=True):
-    """Run a shell command and wait for completion"""
+def run_command(command, wait=True, fail_on_error=False):
+    """Run a shell command and wait for completion.
+
+    When fail_on_error is True, raise RuntimeError on non-zero exit code.
+    """
     print(f"Running: {command}")
     process = subprocess.Popen(command, shell=True)
     if wait:
         process.wait()
         if process.returncode != 0:
-            print(f"Warning: Command '{command}' returned non-zero exit code: {process.returncode}")
+            message = f"Command '{command}' returned non-zero exit code: {process.returncode}"
+            if fail_on_error:
+                raise RuntimeError(message)
+            print(f"Warning: {message}")
     return process
 
 def run_command_capture(command):
@@ -352,7 +358,7 @@ def run_command_capture(command):
 def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type):
     """Run the evaluation pipeline steps 3-7 and return throughput metric."""
     # Step 3: Run loadgen
-    run_command("python -u -m fmperf.loadgen.run")
+    run_command("python -u -m fmperf.loadgen.run", fail_on_error=True)
     
     # Step 4: Change to requests directory
     original_dir = os.getcwd()
