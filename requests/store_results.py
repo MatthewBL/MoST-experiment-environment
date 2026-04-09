@@ -863,6 +863,11 @@ def main():
         # Duration from .env
         duration = _read_env_value(Path('..') / '.env', 'DURATION', '')
 
+        # Endpoint URL used for this run
+        url = (os.environ.get('URL') or '').strip()
+        if not url:
+            url = _read_env_value(Path('..') / '.env', 'URL', '')
+
         # Additive proportion telemetry (JSON strings keyed by token interval label)
         additive_expected_proportions = (os.environ.get('ADDITIVE_EXPECTED_PROPORTIONS') or '').strip()
         additive_true_proportions = (os.environ.get('ADDITIVE_TRUE_PROPORTIONS') or '').strip()
@@ -910,7 +915,7 @@ def main():
                 "MIN_INPUT_TOKENS", "MAX_INPUT_TOKENS",
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
-                "DURATION", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
+                "DURATION", "URL", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
                 "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
                 "RESPONSES_WITHIN_EXPECTED_INTERVAL", "RESPONSES_OUTSIDE_EXPECTED_INTERVAL",
                 "AVG_TOKENS_PER_REQUEST", "AVG_TOKENS_PER_RESPONSE",
@@ -928,6 +933,7 @@ def main():
                 req_min,
                 evaluation,
                 duration,
+                url,
                 total_requests or '',
                 success_rate or '',
                 prompt_token_count or '',
