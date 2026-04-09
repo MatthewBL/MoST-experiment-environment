@@ -12,7 +12,6 @@ from typing import Iterable, List, Optional
 from importlib import resources as impresources
 import fmperf.data
 import traceback
-from transformers import AutoTokenizer
 from pathlib import Path
 
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME
@@ -182,22 +181,26 @@ def _load_prompts_from_jsonl(path: Path):
     return prompts
 
 
+def _resolve_model_from_env() -> Optional[str]:
+    model = os.environ.get("MODEL", "").strip()
+    return model or None
+
+
+def _resolve_vllm_model(url_no_prefix: str) -> str:
+    env_model = _resolve_model_from_env()
+    if env_model:
+        return env_model
+    data = requests.get("http://%s/v1/models" % (url_no_prefix)).json()
+    return data["data"][0]["id"]
+
+
 def generate_vllm_request(config, url, source_text):
     url_no_prefix = url.replace("http://", "")
-
-    model = requests.get("http://%s/v1/models" % (url_no_prefix)).json()["data"][0]["id"]
-
-    hf_token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
-    tokenizer_kwargs = {}
-    if hf_token:
-        tokenizer_kwargs["token"] = hf_token
-
-    tokenizer = AutoTokenizer.from_pretrained(model, **tokenizer_kwargs)
-    prompt_ids = tokenizer(source_text).input_ids
+    model = _resolve_vllm_model(url_no_prefix)
 
     request = {
         "model": model,
-        "prompt": prompt_ids,
+        "prompt": source_text,
         "ignore_eos": True,
         "min_tokens": config["out_tokens"],
         "max_tokens": config["out_tokens"],
@@ -242,12 +245,9 @@ def generate_vllm_request(config, url, source_text):
 
     assert len(expected) == config["out_tokens"]
 
-    try:
-        prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
-    except Exception:
-        prompt_text = source_text
-
-    return request, expected, prompt_text, len(prompt_ids)
+    prompt_text = source_text
+    prompt_token_count = int(config.get("in_tokens", 0))
+    return request, expected, prompt_text, prompt_token_count
 
 
 def generate_tgis_request(config, url, source_text):
@@ -272,7 +272,7 @@ def generate_tgis_request(config, url, source_text):
     }
 
     request = {
-        "model_id": "null",
+        "model_id": _resolve_model_from_env() or "null",
         "params": params,
         "request": {
             "text": source_text,
@@ -423,10 +423,14 @@ if args.from_model:
                     req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
                     case["request"], case["expected"] = req, expected
                     case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                    case["expected_model"] = req.get("model_id")
+                    req["model_id"] = "__ENV_MODEL__"
                 elif target == "vllm":
                     req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
                     case["request"], case["expected"] = req, expected
                     case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                    case["expected_model"] = req.get("model")
+                    req["model"] = "__ENV_MODEL__"
                 else:
                     raise ValueError(f"Invalid target: {target}")
 
@@ -474,10 +478,14 @@ else:
                     req, expected, prompt_text, prompt_token_count = generate_tgis_request(config, url, source_text)
                     case["request"], case["expected"] = req, expected
                     case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                    case["expected_model"] = req.get("model_id")
+                    req["model_id"] = "__ENV_MODEL__"
                 elif target == "vllm":
                     req, expected, prompt_text, prompt_token_count = generate_vllm_request(config, url, source_text)
                     case["request"], case["expected"] = req, expected
                     case["prompt_text"], case["prompt_token_count"] = prompt_text, prompt_token_count
+                    case["expected_model"] = req.get("model")
+                    req["model"] = "__ENV_MODEL__"
                 else:
                     raise ValueError(f"Invalid target: {target}")
 

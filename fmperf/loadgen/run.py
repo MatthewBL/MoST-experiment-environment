@@ -150,8 +150,13 @@ def run(result_filename=None):
             min_value, max_value = max_value, min_value
         return (min_value, max_value)
 
-    def _build_request_payload(template_request, target, rng, override_bounds):
+    def _build_request_payload(template_request, target, rng, override_bounds, model_override):
         payload = copy.deepcopy(template_request)
+        if model_override:
+            if target == "vllm":
+                payload["model"] = model_override
+            elif target == "tgis":
+                payload["model_id"] = model_override
         if not override_bounds:
             return payload, None
         min_tokens, max_tokens = override_bounds
@@ -175,6 +180,9 @@ def run(result_filename=None):
     outfile = os.path.join(REQUESTS_DIR, result_filename)
     target = os.environ["TARGET"]
     api_url = os.environ["URL"]
+    active_model = os.environ.get("MODEL", "").strip()
+    if target == "vllm" and not active_model:
+        raise ValueError("MODEL environment variable is required when TARGET=vllm")
     req_min = float(os.environ["REQ_MIN"])  # Changed from int() to float() to allow non-integer values
     duration = Duration(os.environ["DURATION"])
     backoff = Duration(os.environ["BACKOFF"])
@@ -191,6 +199,11 @@ def run(result_filename=None):
     def worker(wid, channel, worker_req_per_sec, exp_num_users):
         rs = np.random.RandomState(seed=wid)
         rs_lock = threading.Lock()
+        stub = None
+        if target == "tgis":
+            from text_generation_tests.pb import generation_pb2_grpc as gpb2
+
+            stub = gpb2.GenerationServiceStub(channel)
         
         # Calculate requests per second for this worker with some randomness
         # worker_req_per_sec is the target per worker (REQ_MIN split by num_workers)
@@ -233,7 +246,7 @@ def run(result_filename=None):
                 sample_idx = rs.randint(low=0, high=len(sample_requests))
             template_request = sample_requests[sample_idx]["request"]
             request_payload, _ = _build_request_payload(
-                template_request, target, rs, output_token_override
+                template_request, target, rs, output_token_override, active_model
             )
 
             if target == "vllm":
@@ -415,6 +428,21 @@ def run(result_filename=None):
         if not row["ok"]:
             return False
         case = sample_requests[row["sample_idx"]]
+
+        # A workload file can be model-agnostic (or generated for another model).
+        # Skip strict expected-output checks when expected data comes from a different model.
+        expected_model = case.get("expected_model")
+        req = case.get("request", {}) if isinstance(case, dict) else {}
+        request_model = req.get("model") if isinstance(req, dict) else None
+        request_model_id = req.get("model_id") if isinstance(req, dict) else None
+        if active_model:
+            if expected_model and expected_model != active_model:
+                return True
+            if request_model and request_model not in {"__ENV_MODEL__", active_model}:
+                return True
+            if request_model_id and request_model_id not in {"__ENV_MODEL__", "null", active_model}:
+                return True
+
         expected = case.get("expected")
         if not expected:
             return False

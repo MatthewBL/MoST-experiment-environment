@@ -5,6 +5,7 @@ fmperf repository: https://github.com/fmperf-project/fmperf
 Set your preferences in the [.env](.env) file. Key settings:
 - Duration: Set `DURATION` for each iteration length.
 - URL: Set `URL` to your model endpoint.
+- Model: Set `MODEL` to the model identifier to send in requests (for example, `meta-llama/Llama-3.1-8B-Instruct`).
 - Tokens list: Set `TOKENS_LIST` as comma-separated input/output intervals. Supported formats:
 	- `in:out` (single values)
 	- `inMin-inMax:out` (input range, fixed output)
@@ -18,6 +19,7 @@ Set your preferences in the [.env](.env) file. Key settings:
 Notes:
 - The values `MIN/MAX_INPUT/OUTPUT_TOKENS` are set per iteration from `TOKENS_LIST`; the [.env](.env) file is not modified during runs.
 - `REQ_MIN` changes automatically per iteration based on `REQ_MIN_INCREASE_MULTIPLIER` (stage 1) and binary search (stage 2); configuration is read from [.env](.env) by [experiment_automation.py](experiment_automation.py).
+- Generated workload files are model-agnostic: the runtime sender injects `MODEL` from [.env](.env) when dispatching each request.
 
 # How to run
 Once everything is set up, run the following command:
