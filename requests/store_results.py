@@ -739,33 +739,16 @@ def main():
         dir_name, timestamp_source = _derive_directory_name()
         print(f"Using timestamp from {timestamp_source} to create directory: {dir_name}")
         
-        # Get parent directory from command line arguments
+        # Parse CLI arguments from experiment_automation.py.
+        # Supported formats:
+        # - Compact (current): model, stage, parent_dir, in_range, out_range, req_min, evaluation, [median], [prompt_token_count]
+        # - Legacy:            model, gpus, cpus, node, stage, parent_dir, in_range, out_range, req_min, evaluation, [median], [prompt_token_count]
+        args = sys.argv[1:]
+        is_compact_cli = len(args) >= 7 and ('_' in str(args[2]) or '/' in str(args[2]) or '\\' in str(args[2]))
+
         parent_dir = None
-        if len(sys.argv) >= 7:
-            parent_dir = sys.argv[6]
-        
-        # Create the full directory path
-        if parent_dir:
-            full_dir_path = os.path.join(parent_dir, dir_name)
-            os.makedirs(parent_dir, exist_ok=True)  # Ensure parent directory exists
-        else:
-            full_dir_path = dir_name
-        
-        os.makedirs(full_dir_path, exist_ok=True)
-        print(f"Created directory: {full_dir_path}")
-        
-        # Get values from command line arguments
-        if len(sys.argv) >= 5:
-            model = sys.argv[1]
-        else:
-            # Fallback to environment variables if arguments not provided
-            model = os.environ.get('MODEL', '')
-        
-        # Get stage from command line arguments or environment
-        if len(sys.argv) >= 6:
-            stage = sys.argv[5]
-        else:
-            stage = os.environ.get('STAGE', '')
+        model = os.environ.get('MODEL', '')
+        stage = os.environ.get('STAGE', '')
         
         # Resolve tokens (min/max), REQ_MIN, EVALUATION, MEDIAN: prefer CLI args, then env/log, then .env
         min_input_tokens = ''
@@ -777,22 +760,45 @@ def main():
         median_cli = ''
         prompt_token_count_cli = ''  # deprecated: will use median over prompts
 
-        # CLI args provided from experiment_automation.py
-        if len(sys.argv) >= 11:
-            in_range_str = sys.argv[7]
-            out_range_str = sys.argv[8]
+        if is_compact_cli:
+            model = args[0]
+            stage = args[1]
+            parent_dir = args[2]
+
+            in_range_str = args[3]
+            out_range_str = args[4]
             mi, ma = _parse_range(in_range_str)
             mo, moa = _parse_range(out_range_str)
             min_input_tokens = mi or ''
             max_input_tokens = ma or ''
             min_output_tokens = mo or ''
             max_output_tokens = moa or ''
-            req_min = sys.argv[9]
-            evaluation_flag = sys.argv[10]
-            if len(sys.argv) >= 12:
-                median_cli = sys.argv[11]
-            if len(sys.argv) >= 13:
-                prompt_token_count_cli = sys.argv[12]
+            req_min = args[5]
+            evaluation_flag = args[6]
+            if len(args) >= 8:
+                median_cli = args[7]
+            if len(args) >= 9:
+                prompt_token_count_cli = args[8]
+        elif len(args) >= 10:
+            # Backward-compatible parsing for legacy positional arguments.
+            model = args[0]
+            stage = args[4]
+            parent_dir = args[5]
+
+            in_range_str = args[6]
+            out_range_str = args[7]
+            mi, ma = _parse_range(in_range_str)
+            mo, moa = _parse_range(out_range_str)
+            min_input_tokens = mi or ''
+            max_input_tokens = ma or ''
+            min_output_tokens = mo or ''
+            max_output_tokens = moa or ''
+            req_min = args[8]
+            evaluation_flag = args[9]
+            if len(args) >= 11:
+                median_cli = args[10]
+            if len(args) >= 12:
+                prompt_token_count_cli = args[11]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -802,6 +808,16 @@ def main():
             req_min = os.environ.get('REQ_MIN', '')
             evaluation_flag = os.environ.get('EVALUATION', '')
             prompt_token_count_cli = os.environ.get('PROMPT_TOKEN_COUNT', '')
+
+        # Create the full directory path
+        if parent_dir:
+            full_dir_path = os.path.join(parent_dir, dir_name)
+            os.makedirs(parent_dir, exist_ok=True)  # Ensure parent directory exists
+        else:
+            full_dir_path = dir_name
+        
+        os.makedirs(full_dir_path, exist_ok=True)
+        print(f"Created directory: {full_dir_path}")
 
         # Fallback to .env only if still missing
         if (min_input_tokens == '' or max_input_tokens == '' or min_output_tokens == '' or max_output_tokens == '' or req_min == '') and os.path.exists('../.env'):

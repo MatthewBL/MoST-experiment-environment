@@ -191,7 +191,10 @@ def _resolve_vllm_model(url_no_prefix: str) -> str:
     if env_model:
         return env_model
     data = requests.get("http://%s/v1/models" % (url_no_prefix)).json()
-    return data["data"][0]["id"]
+    resolved_model = data["data"][0]["id"]
+    # Persist resolved model so downstream scripts can consume MODEL from env.
+    os.environ["MODEL"] = resolved_model
+    return resolved_model
 
 
 def generate_vllm_request(config, url, source_text):

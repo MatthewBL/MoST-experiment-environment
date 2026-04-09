@@ -1,14 +1,11 @@
 import csv
-import os
-import subprocess
-import time
-from pathlib import Path
-import re
-import os
 import json
+import os
+import re
 import subprocess
 import time
 from collections import defaultdict
+from pathlib import Path
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
@@ -386,7 +383,7 @@ def run_command_capture(command):
         print(f"Warning: Command '{command}' returned non-zero exit code: {result.returncode}")
     return result.returncode, result.stdout, result.stderr
 
-def run_evaluation_pipeline(model, gpus, cpus, node, stage, parent_dir, experiment_type):
+def run_evaluation_pipeline(experiment_type):
     """Run the evaluation pipeline steps 3-7 and return throughput metric."""
     # Step 3: Run loadgen
     run_command("python -u -m fmperf.loadgen.run", fail_on_error=True)
@@ -460,7 +457,7 @@ def start_stage_1():
     """Initialize stage 1"""
     return 1
 
-def end_experiment(stage, M, m, M_0, m_0, evaluation):
+def end_experiment(stage, M, m, evaluation):
     """Check termination condition for stage 2 using a relative threshold based on M.
 
     Stops when the gap (M - m) is less than or equal to M * STOP_THRESHOLD.
@@ -569,9 +566,6 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     """
     # Get environment variables at the start and store them as Python variables
     model = os.environ.get('MODEL', '')
-    gpus = os.environ.get('GPUS', '')
-    cpus = os.environ.get('CPUS', '')
-    node = os.environ.get('NODE', '')
     experiment_type = get_experiment_type()
     is_mit = (experiment_type == 'MIT')
     print(f"Experiment type: {experiment_type}")
@@ -580,7 +574,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     if duration_seconds is None and is_mit:
         print("Warning: Unable to determine experiment duration; MIT throughput checks may be unavailable.")
     
-    print(f"Stored configuration - MODEL: {model}, GPUS: {gpus}, CPUS: {cpus}, NODE: {node}")
+    print(f"Stored configuration - MODEL: {model}")
     
     # Create parent directory for this token pair
     # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
@@ -725,7 +719,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
         try:
             evaluation_result, responded_per_min = run_evaluation_pipeline(
-                model, gpus, cpus, node, stage, parent_dir, experiment_type
+                experiment_type
             )
         except RuntimeError as exc:
             reason = str(exc)
@@ -791,7 +785,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
 
         # Step 8: Check termination condition (for stage 2)
         if stage == 2:
-            should_end, result_type, result_value = end_experiment(stage, M, m, M_0, m_0, evaluation_result)
+            should_end, result_type, result_value = end_experiment(stage, M, m, evaluation_result)
             if should_end:
                 if result_type == "REQ_MIN":
                     print(f"\nExperiment completed successfully! Optimal REQ_MIN = {req_min}")
@@ -846,7 +840,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             # Pass prompt details directly to store_results.py to avoid re-parsing
             store_args = [
                 "python", "-u", "store_results.py",
-                str(model), str(gpus), str(cpus), str(node), str(stage), str(parent_dir),
+                str(model), str(stage), str(parent_dir),
                 str(interval_strs[0]), str(interval_strs[1]), str(req_min_used), str(evaluation_flag), str(median_str),
                 str(prompt_token_count if prompt_token_count is not None else ''),
                 str(prompt_text if prompt_text is not None else '')
