@@ -97,6 +97,7 @@ def load_env_config():
         'STOP_THRESHOLD': 0.5,
         'EXPERIMENT_TYPE': 'MST',
         'DURATION': None,
+        'ITERATION_COOLDOWN_SECONDS': 180.0,
     }
 
     if env_path.exists():
@@ -133,6 +134,13 @@ def load_env_config():
                     config['EXPERIMENT_TYPE'] = val.strip() or 'MST'
                 elif key == 'DURATION':
                     config['DURATION'] = val.strip()
+                elif key == 'ITERATION_COOLDOWN_SECONDS':
+                    try:
+                        parsed = float(val)
+                        if parsed >= 0:
+                            config['ITERATION_COOLDOWN_SECONDS'] = parsed
+                    except ValueError:
+                        pass
 
     return config
 
@@ -189,6 +197,29 @@ def _get_duration_seconds():
     if seconds is not None:
         return seconds
     return _parse_duration_seconds(CONFIG.get('DURATION'))
+
+
+def _get_iteration_cooldown_seconds():
+    """Resolve cooldown seconds between iterations from env or config."""
+    env_val = os.environ.get('ITERATION_COOLDOWN_SECONDS')
+    if env_val is not None:
+        parsed_env = _parse_duration_seconds(env_val)
+        if parsed_env is None:
+            try:
+                parsed_env = float(env_val)
+            except ValueError:
+                parsed_env = None
+        if parsed_env is not None and parsed_env >= 0:
+            return parsed_env
+
+    config_val = CONFIG.get('ITERATION_COOLDOWN_SECONDS', 180.0)
+    parsed_config = _parse_duration_seconds(config_val)
+    if parsed_config is None:
+        try:
+            parsed_config = float(config_val)
+        except (TypeError, ValueError):
+            parsed_config = 180.0
+    return parsed_config if parsed_config >= 0 else 180.0
 
 
 def _compute_success_rate_from_results():
@@ -545,6 +576,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     is_mit = (experiment_type == 'MIT')
     print(f"Experiment type: {experiment_type}")
     duration_seconds = _get_duration_seconds()
+    iteration_cooldown_seconds = _get_iteration_cooldown_seconds()
     if duration_seconds is None and is_mit:
         print("Warning: Unable to determine experiment duration; MIT throughput checks may be unavailable.")
     
@@ -824,11 +856,15 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         finally:
             os.chdir(original_dir2)
         
-    # Small delay to avoid overwhelming the system
-        time.sleep(1)
-
         if stop_after_persist:
             return persist_return_value
+
+        # Wait before the next iteration to allow system cooldown.
+        if iteration < max_iterations and iteration_cooldown_seconds > 0:
+            print(
+                f"Cooling down for {iteration_cooldown_seconds:g}s before next iteration..."
+            )
+            time.sleep(iteration_cooldown_seconds)
     
     print(f"\nReached maximum iterations ({max_iterations}). Stopping.")
     return None

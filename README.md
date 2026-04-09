@@ -4,6 +4,7 @@ fmperf repository: https://github.com/fmperf-project/fmperf
 
 Set your preferences in the [.env](.env) file. Key settings:
 - Duration: Set `DURATION` for each iteration length.
+- Iteration cooldown: Set `ITERATION_COOLDOWN_SECONDS` to wait between iterations (default: `180`).
 - URL: Set `URL` to your model endpoint.
 - Model discovery timeout: Set `MODEL_DISCOVERY_TIMEOUT` (seconds) for runtime model lookup via `URL/v1/models`.
 - Tokens list: Set `TOKENS_LIST` as comma-separated input/output intervals. Supported formats:
