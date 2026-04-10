@@ -965,7 +965,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     stop_after_persist = True
                     persist_return_value = result_value
 
-        if not stop_after_persist and iteration > iteration_hard_limit:
+        if not stop_after_persist and iteration >= iteration_hard_limit:
             if stage == 1:
                 stop_after_persist = True
                 evaluation_for_store = False
