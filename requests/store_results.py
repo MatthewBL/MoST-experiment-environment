@@ -856,6 +856,9 @@ def main():
         evaluation_flag = ''
         median_cli = ''
         resolved_model_cli = ''
+        termination_reason = ''
+        binary_distance_abs = ''
+        binary_distance_rel = ''
 
         if is_compact_cli:
             model = args[0]
@@ -876,6 +879,12 @@ def main():
                 median_cli = args[7]
             if len(args) >= 9:
                 resolved_model_cli = args[8]
+            if len(args) >= 10:
+                termination_reason = args[9]
+            if len(args) >= 11:
+                binary_distance_abs = args[10]
+            if len(args) >= 12:
+                binary_distance_rel = args[11]
         elif len(args) >= 10:
             # Backward-compatible parsing for legacy positional arguments.
             model = args[0]
@@ -896,6 +905,12 @@ def main():
                 median_cli = args[10]
             if len(args) >= 12:
                 resolved_model_cli = args[11]
+            if len(args) >= 13:
+                termination_reason = args[12]
+            if len(args) >= 14:
+                binary_distance_abs = args[13]
+            if len(args) >= 15:
+                binary_distance_rel = args[14]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -905,6 +920,9 @@ def main():
             req_min = os.environ.get('REQ_MIN', '')
             evaluation_flag = os.environ.get('EVALUATION', '')
             resolved_model_cli = os.environ.get('MODEL_USED_RESOLVED', '')
+            termination_reason = os.environ.get('TERMINATION_REASON', '')
+            binary_distance_abs = os.environ.get('BINARY_SEARCH_DISTANCE', '')
+            binary_distance_rel = os.environ.get('BINARY_SEARCH_RELATIVE_DISTANCE', '')
 
         # Create the full directory path
         if parent_dir:
@@ -1038,7 +1056,8 @@ def main():
                 "AVG_TOKENS_PER_REQUEST", "AVG_TOKENS_PER_RESPONSE",
                 "INPUT_TOKEN_VARIANCE", "OUTPUT_TOKEN_VARIANCE",
                 "INPUT_TOKEN_PERCENTILES", "OUTPUT_TOKEN_PERCENTILES", "REQUEST_TOTAL_TOKEN_PERCENTILES",
-                "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS"
+                "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS",
+                "TERMINATION_REASON", "BINARY_SEARCH_DISTANCE", "BINARY_SEARCH_RELATIVE_DISTANCE"
             ])
             # Write data row
             writer.writerow([
@@ -1066,6 +1085,11 @@ def main():
                 input_token_percentiles or '',
                 output_token_percentiles or '',
                 request_total_token_percentiles or '',
+                '',
+                '',
+                termination_reason or '',
+                binary_distance_abs or '',
+                binary_distance_rel or '',
             ])
         
         print(f"Created results.csv in {full_dir_path}")

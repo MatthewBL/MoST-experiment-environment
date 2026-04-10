@@ -98,6 +98,7 @@ def load_env_config():
         'EXPERIMENT_TYPE': 'MST',
         'DURATION': None,
         'ITERATION_COOLDOWN_SECONDS': 180.0,
+        'ITERATION_HARD_LIMIT': 15,
     }
 
     if env_path.exists():
@@ -139,6 +140,13 @@ def load_env_config():
                         parsed = float(val)
                         if parsed >= 0:
                             config['ITERATION_COOLDOWN_SECONDS'] = parsed
+                    except ValueError:
+                        pass
+                elif key == 'ITERATION_HARD_LIMIT':
+                    try:
+                        parsed_limit = int(val)
+                        if parsed_limit > 0:
+                            config['ITERATION_HARD_LIMIT'] = parsed_limit
                     except ValueError:
                         pass
 
@@ -355,6 +363,27 @@ def _get_iteration_cooldown_seconds():
         except (TypeError, ValueError):
             parsed_config = 180.0
     return parsed_config if parsed_config >= 0 else 180.0
+
+
+def _get_iteration_hard_limit():
+    """Resolve hard limit (integer iterations) for each token experiment."""
+    env_val = os.environ.get('ITERATION_HARD_LIMIT')
+    if env_val is not None:
+        try:
+            parsed_env = int(str(env_val).strip())
+            if parsed_env > 0:
+                return parsed_env
+        except ValueError:
+            pass
+
+    config_val = CONFIG.get('ITERATION_HARD_LIMIT', 15)
+    try:
+        parsed_config = int(config_val)
+        if parsed_config > 0:
+            return parsed_config
+    except (TypeError, ValueError):
+        pass
+    return 15
 
 
 def _compute_success_rate_from_results():
@@ -709,8 +738,10 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     print(f"Experiment type: {experiment_type}")
     duration_seconds = _get_duration_seconds()
     iteration_cooldown_seconds = _get_iteration_cooldown_seconds()
+    iteration_hard_limit = _get_iteration_hard_limit()
     if duration_seconds is None and is_mit:
         print("Warning: Unable to determine experiment duration; MIT throughput checks may be unavailable.")
+    print(f"Iteration hard limit for this token experiment: {iteration_hard_limit}")
     
     print(f"Stored configuration - MODEL: {model}")
 
@@ -915,6 +946,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         # then return the recorded value after store_results.py runs.
         stop_after_persist = False
         persist_return_value = None
+        termination_reason = ''
+        req_min_for_store = req_min_used
+        evaluation_for_store = evaluation_result
+        binary_distance_abs = ''
+        binary_distance_rel = ''
 
         # Step 8: Check termination condition (for stage 2)
         if stage == 2:
@@ -928,6 +964,55 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                     print(f"\nExperiment completed! Result m = {result_value}")
                     stop_after_persist = True
                     persist_return_value = result_value
+
+        if not stop_after_persist and iteration > iteration_hard_limit:
+            if stage == 1:
+                stop_after_persist = True
+                evaluation_for_store = False
+                termination_reason = (
+                    f"FAILED_STAGE1_ITERATION_LIMIT_EXCEEDED(limit={iteration_hard_limit}, iteration={iteration})"
+                )
+                persist_return_value = {
+                    "failed": True,
+                    "reason": "stage1_iteration_hard_limit_exceeded",
+                    "iteration": iteration,
+                    "limit": iteration_hard_limit,
+                }
+                print(
+                    "Iteration hard limit reached in Stage 1. "
+                    "Ending current token experiment as failed."
+                )
+            elif stage == 2:
+                stop_after_persist = True
+                termination_reason = (
+                    f"STOPPED_STAGE2_ITERATION_LIMIT_EXCEEDED(limit={iteration_hard_limit}, iteration={iteration})"
+                )
+                largest_true = m
+                smallest_false = M
+                if largest_true is not None:
+                    req_min_for_store = largest_true
+                persist_return_value = largest_true
+
+                if (largest_true is not None) and (smallest_false is not None):
+                    try:
+                        abs_gap = float(smallest_false) - float(largest_true)
+                        binary_distance_abs = f"{abs_gap:.6f}".rstrip('0').rstrip('.')
+                    except Exception:
+                        binary_distance_abs = ''
+
+                if (M_0 is not None) and (m_0 is not None) and binary_distance_abs != '':
+                    try:
+                        initial_gap = float(M_0) - float(m_0)
+                        if initial_gap != 0:
+                            rel_gap = float(binary_distance_abs) / initial_gap
+                            binary_distance_rel = f"{rel_gap:.6f}".rstrip('0').rstrip('.')
+                    except Exception:
+                        binary_distance_rel = ''
+
+                print(
+                    "Iteration hard limit reached in Stage 2. "
+                    f"Returning largest TRUE REQ_MIN: {largest_true}"
+                )
         
         # Steps 9-10: Update stage variables
         if not stop_after_persist:
@@ -962,14 +1047,17 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         try:
             original_dir2 = os.getcwd()
             os.chdir('requests')
-            evaluation_flag = "TRUE" if evaluation_result else "FALSE"
+            evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
                 "python", "-u", "store_results.py",
                 str(model), str(stage), str(parent_dir),
-                str(interval_strs[0]), str(interval_strs[1]), str(req_min_used), str(evaluation_flag), str(median_str),
-                str(os.environ.get('MODEL_USED_RESOLVED', ''))
+                str(interval_strs[0]), str(interval_strs[1]), str(req_min_for_store), str(evaluation_flag), str(median_str),
+                str(os.environ.get('MODEL_USED_RESOLVED', '')),
+                str(termination_reason),
+                str(binary_distance_abs),
+                str(binary_distance_rel),
             ]
             print("Running (args):", " ".join(store_args))
             subprocess.run(store_args)

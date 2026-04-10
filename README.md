@@ -5,6 +5,7 @@ fmperf repository: https://github.com/fmperf-project/fmperf
 Set your preferences in the [.env](.env) file. Key settings:
 - Duration: Set `DURATION` for each iteration length.
 - Iteration cooldown: Set `ITERATION_COOLDOWN_SECONDS` to wait between iterations (default: `180`).
+- Iteration hard limit: Set `ITERATION_HARD_LIMIT` to cap iterations per token-interval experiment (default: `15`). The cap is enforced when the iteration count surpasses this value.
 - URL: Set `URL` to your model endpoint.
 - Model discovery timeout: Set `MODEL_DISCOVERY_TIMEOUT` (seconds) for runtime model lookup via `URL/v1/models`.
 - Tokens list: Set `TOKENS_LIST` as comma-separated input/output intervals. Supported formats:
@@ -20,6 +21,8 @@ Set your preferences in the [.env](.env) file. Key settings:
 Notes:
 - The values `MIN/MAX_INPUT/OUTPUT_TOKENS` are set per iteration from `TOKENS_LIST`; the [.env](.env) file is not modified during runs.
 - `REQ_MIN` changes automatically per iteration based on `REQ_MIN_INCREASE_MULTIPLIER` (stage 1) and binary search (stage 2); configuration is read from [.env](.env) by [experiment_automation.py](experiment_automation.py).
+- If `ITERATION_HARD_LIMIT` is exceeded in stage 1, the current token-interval experiment stops and is marked as failed.
+- If `ITERATION_HARD_LIMIT` is exceeded in stage 2, the current token-interval experiment stops and returns the largest TRUE `REQ_MIN` seen in binary search.
 - Generated workload files are model-agnostic: the runtime sender discovers model id from `URL/v1/models` and injects it when dispatching each request.
 
 # How to run
@@ -37,7 +40,14 @@ sbatch experiment_automation.slurm
 
 # Results
 
-The results can be found in the folder /requests, under the name XXX_YYY, where XXX is the number of input tokens of the iteration and YYY is the number of output tokens of the iteration. Within these folders, you will find more folders with the timestamp of each iteration. Finally, here you will find "first_half.csv", "second_half.csv", "output.csv", "results.csv" and "results.json". "first_half.csv" and "second_half.csv" is a summary of the response time of tokens generated in the first and second halves of the experiment, and "output.csv" is the file from which these two are obtained. "results.json" is the standard output of fmperf, where you can find information per token generated. Finally, "results.csv" is a summary of the results obtained from the iteration, although a few of the attributes found in this file are deprecated and would only be of use in our HPC, the most relevant ones are "INPUT_TOKENS", "OUTPUT_TOKENS", "EVALUATION" and "REQ_MIN"; EVALUATION is True if the iteration is deemed sustainable.
+The results can be found in the folder /requests, under the name XXX_YYY, where XXX is the number of input tokens of the iteration and YYY is the number of output tokens of the iteration. Within these folders, you will find more folders with the timestamp of each iteration. Finally, here you will find "first_half.csv", "second_half.csv", "output.csv", "results.csv" and "results.json". "first_half.csv" and "second_half.csv" is a summary of the response time of tokens generated in the first and second halves of the experiment, and "output.csv" is the file from which these two are obtained. "results.json" is the standard output of fmperf, where you can find information per token generated. Finally, "results.csv" is a summary of the results obtained from the iteration.
+
+Relevant `results.csv` fields:
+- `REQ_MIN`: requests per minute used for the persisted iteration record. When stage 2 stops due to hard limit, this is the largest TRUE value found.
+- `EVALUATION`: `TRUE` when the iteration is deemed sustainable, `FALSE` otherwise.
+- `TERMINATION_REASON`: optional reason for early termination. Populated when hard-limit stop conditions are hit.
+- `BINARY_SEARCH_DISTANCE`: optional absolute distance between smallest FALSE and largest TRUE values in stage 2 (`M - m`) when hard limit is exceeded.
+- `BINARY_SEARCH_RELATIVE_DISTANCE`: optional relative stage-2 gap, computed as `(M - m) / (M_0 - m_0)` when hard limit is exceeded.
 
 # How it works
 
@@ -48,8 +58,12 @@ The experiment consists of two stages:
 ## Find non-sustainable value
 REQ_MIN starts at `REQ_MIN_START` and is increased by `REQ_MIN_INCREASE_MULTIPLIER` between iterations. At the end of each iteration, we use the code in [requests/evaluate.py](requests/evaluate.py) to determine if the iteration is sustainable or not. As long as the iterations performed are sustainable, we continue to increase REQ_MIN. As soon as one of them is not sustainable, this stage ends.
 
+If `ITERATION_HARD_LIMIT` is exceeded during this stage, the token-interval experiment ends immediately and is marked as failed in `results.csv`.
+
 ## Find MST
 We set _m_ to the highest stable value for REQ_MIN and _M_ to the found unsustainable value of REQ_MIN. A binary search is performed, where REQ_MIN is set to the in-between value of _M_ and _m_ and we run an iteration. We evaluate the result, and update _m_ or _M_ accordingly, based on whether the value is deemed sustainable or not. This stage ends once _M - m_ is less than or equal to `STOP_THRESHOLD`.
+
+If `ITERATION_HARD_LIMIT` is exceeded during this stage, the token-interval experiment ends and returns the largest TRUE value (`m`) as output. The final `results.csv` entry also records termination metadata and binary-search gap values.
 
 ## More information
 
