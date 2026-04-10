@@ -268,6 +268,61 @@ def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> st
 
     return ""
 
+
+def _looks_like_url(value: str | None) -> bool:
+    s = _normalize_endpoint_value(value)
+    if not s:
+        return False
+    parsed = urllib.parse.urlparse(s)
+    return bool(parsed.scheme and parsed.netloc)
+
+
+def _resolve_model_used(
+    resolved_model_cli: str,
+    model_from_url: str,
+    model_from_slurm: str,
+    model_arg: str,
+    endpoint_candidates: list[str],
+) -> str:
+    """Resolve final MODEL_USED value while avoiding raw URL values.
+
+    Priority:
+    1) Explicit resolved model from CLI/env.
+    2) Queried model from endpoint metadata.
+    3) Model parsed from Slurm logs.
+    4) Model argument (unless it is a URL; in that case query it first).
+    """
+    cli_model = (resolved_model_cli or "").strip()
+    if cli_model:
+        return cli_model
+
+    if (model_from_url or "").strip():
+        return model_from_url.strip()
+
+    if (model_from_slurm or "").strip():
+        return model_from_slurm.strip()
+
+    model_raw = (model_arg or "").strip()
+    if not model_raw:
+        return ""
+
+    if _looks_like_url(model_raw):
+        # Last chance: MODEL positional arg itself may be a URL.
+        queried = _extract_model_from_url(model_raw)
+        if queried:
+            return queried.strip()
+
+        # Reuse any known endpoints as fallback probes.
+        for endpoint_value in endpoint_candidates:
+            queried = _extract_model_from_url(endpoint_value)
+            if queried:
+                return queried.strip()
+
+        # Keep CSV clean: if unresolved and value is URL, avoid storing URL itself.
+        return ""
+
+    return model_raw
+
 def _extract_median_tokens_from_log(slurm_path: str | None) -> str | None:
     """Parse the latest 'Median tokens per response: <value>' printed by experiment_automation.
     Prefer the last occurrence in the Slurm log; return None if unavailable.
@@ -986,6 +1041,10 @@ def main():
             _read_env_value(Path('..') / '.env', 'URL', ''),
             _read_env_value(Path('..') / '.env', 'FMPERF_ENDPOINT_URL', ''),
         ]
+
+        # Some launch paths pass the endpoint in MODEL positional arg.
+        if _looks_like_url(model):
+            endpoint_candidates.append(model)
         url = ''
         for endpoint_value in endpoint_candidates:
             normalized = _normalize_endpoint_value(endpoint_value)
@@ -1040,6 +1099,14 @@ def main():
         output_token_percentiles = stats.get("output_token_percentiles")
         request_total_token_percentiles = stats.get("request_total_token_percentiles")
 
+        model_used = _resolve_model_used(
+            resolved_model_cli=resolved_model_cli,
+            model_from_url=model_from_url,
+            model_from_slurm=model_from_slurm,
+            model_arg=model,
+            endpoint_candidates=endpoint_candidates,
+        )
+
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
@@ -1061,7 +1128,7 @@ def main():
             ])
             # Write data row
             writer.writerow([
-                (resolved_model_cli or '').strip() or model_from_url or model_from_slurm or model,
+                model_used,
                 min_input_tokens,
                 max_input_tokens,
                 min_output_tokens,
