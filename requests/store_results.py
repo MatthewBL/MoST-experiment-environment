@@ -36,32 +36,13 @@ def _normalize_endpoint_value(value: str | None) -> str:
     return str(value).strip().strip('"').strip("'")
 
 
-def _model_hint_from_endpoint_value(value: str | None) -> str:
-    endpoint = _normalize_endpoint_value(value)
-    if not endpoint:
-        return ""
+def _normalize_endpoint_base_url(value: str | None) -> str:
+    """Normalize endpoint into a base URL like http://host:port.
 
-    parsed = urllib.parse.urlparse(endpoint)
-    if parsed.scheme and parsed.netloc:
-        path = (parsed.path or "").strip("/")
-        if path:
-            parts = [p for p in path.split("/") if p and p not in ("v1", "chat", "completions", "generate", "models")]
-            if parts:
-                return parts[-1]
-        return ""
-
-    # Plain identifier like service/model name.
-    return endpoint
-
-
-def _normalize_endpoint_to_url(value: str | None) -> str:
-    """Normalize endpoint values into an absolute URL when possible.
-
-    Accepts values such as:
-    - http://host:port
-    - https://host/path
-    - host:port
-    - host:port/path
+    Accepts values with or without scheme, e.g.:
+    - gpu05:9000
+    - http://gpu05:9000
+    - http://gpu05:9000/v1/completions
     """
     endpoint = _normalize_endpoint_value(value)
     if not endpoint:
@@ -69,15 +50,21 @@ def _normalize_endpoint_to_url(value: str | None) -> str:
 
     parsed = urllib.parse.urlparse(endpoint)
     if parsed.scheme and parsed.netloc:
-        return endpoint
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
 
-    # Common case from .env / runner: host:port[/path] without scheme.
-    if " " in endpoint:
+    # Typical env value without scheme.
+    if " " in endpoint or endpoint.startswith("/"):
         return ""
-    if ":" in endpoint and not endpoint.startswith("/"):
-        return f"http://{endpoint}"
+    if ":" in endpoint:
+        parsed2 = urllib.parse.urlparse(f"http://{endpoint}")
+        if parsed2.netloc:
+            return urllib.parse.urlunparse((parsed2.scheme, parsed2.netloc, "", "", "", ""))
 
     return ""
+
+
+def _is_endpoint_like(value: str | None) -> bool:
+    return bool(_normalize_endpoint_base_url(value))
 
 def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     """Return (job_id, slurm_log_path) if found.
@@ -151,195 +138,80 @@ def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
 
     return job, None
 
-def _extract_model_from_slurm(slurm_path: str | None) -> str:
-    """Extract model name from Slurm log.
-    Handles both free-text lines (e.g., 'MODEL: foo') and JSON lines like
-    '"model": "google/gemma-7b"'. Returns an empty string if not found.
-    """
-    if not slurm_path:
+
+def _query_model_id_from_endpoint(value: str | None, timeout_seconds: float = 10.0) -> str:
+    """Query /v1/models and return the first model id, mirroring run.py behavior."""
+    base_url = _normalize_endpoint_base_url(value)
+    if not base_url:
         return ""
-    # Put JSON-aware pattern first to match the provided log format
-    patterns = [
-        r"\"model\"\s*:\s*\"([^\"]+)\"",  # JSON key: "model": "..."
-        r"\bMODEL\s*[:=]\s*([^\s,]+)",
-        r"\bModel used\s*[:=]\s*(.+)",
-        r"\bUsing model\s*[:=]?\s*(.+)",
-        r"\b--model\s+([^\s]+)",
-        r"\bmodel\s*[:=]\s*([^\s,]+)",
-    ]
+
+    models_url = urllib.parse.urljoin(base_url + "/", "v1/models")
     try:
-        with open(slurm_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                s = line.strip()
-                for pat in patterns:
-                    m = re.search(pat, s, re.IGNORECASE)
-                    if m:
-                        val = m.group(1).strip()
-                        # Sanitize quotes/padding/nulls
-                        val = val.replace("\x00", "").strip().strip('"\'')
-                        return val
+        req = urllib.request.Request(
+            models_url,
+            headers={"Accept": "application/json", "User-Agent": "store-results/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                return ""
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return ""
     except Exception:
-        pass
-    return ""
-
-
-def _extract_model_from_payload(payload) -> str:
-    """Best-effort model extraction from common API payload shapes."""
-    if isinstance(payload, dict):
-        for key in ("model", "model_name", "name", "id"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-
-        data = payload.get("data")
-        if isinstance(data, list):
-            for item in data:
-                model = _extract_model_from_payload(item)
-                if model:
-                    return model
-
-        models = payload.get("models")
-        if isinstance(models, list):
-            for item in models:
-                model = _extract_model_from_payload(item)
-                if model:
-                    return model
-
-    if isinstance(payload, list):
-        for item in payload:
-            model = _extract_model_from_payload(item)
-            if model:
-                return model
-
-    return ""
-
-
-def _build_model_probe_urls(url: str) -> list[str]:
-    """Build likely model-discovery URLs from an inference endpoint URL."""
-    if not url:
-        return []
-
-    parsed = urllib.parse.urlparse(url)
-    if not parsed.scheme or not parsed.netloc:
-        return []
-
-    original = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-    path = parsed.path.rstrip("/")
-
-    candidate_paths = [path]
-    if path.endswith("/chat/completions"):
-        candidate_paths.append(path[: -len("/chat/completions")] + "/models")
-    if path.endswith("/completions"):
-        candidate_paths.append(path[: -len("/completions")] + "/models")
-    if path.endswith("/generate"):
-        candidate_paths.append(path[: -len("/generate")] + "/info")
-
-    # Also probe conventional OpenAI/TGI-compatible paths.
-    candidate_paths.extend(["/v1/models", "/models", "/info"])
-
-    seen = set()
-    urls = []
-    for p in candidate_paths:
-        normalized = p if p.startswith("/") else "/" + p
-        full = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, normalized, "", "", ""))
-        if full not in seen:
-            seen.add(full)
-            urls.append(full)
-
-    if original not in seen:
-        urls.insert(0, original)
-
-    return urls
-
-
-def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> str:
-    """Fetch model name from URL by probing common metadata endpoints."""
-    endpoint = _normalize_endpoint_to_url(url)
-    if not endpoint:
         return ""
 
-    for probe_url in _build_model_probe_urls(endpoint):
-        try:
-            req = urllib.request.Request(
-                probe_url,
-                headers={"Accept": "application/json", "User-Agent": "store-results/1.0"},
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-                raw = resp.read()
-
-            try:
-                text = raw.decode("utf-8", errors="replace")
-            except Exception:
-                continue
-
-            try:
-                payload = json.loads(text)
-            except Exception:
-                continue
-
-            model = _extract_model_from_payload(payload)
-            if model:
-                return model
-        except (urllib.error.URLError, TimeoutError, ValueError):
-            continue
-        except Exception:
-            continue
-
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return ""
+    first = data[0]
+    if not isinstance(first, dict):
+        return ""
+    model_id = first.get("id")
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id.strip()
     return ""
 
 
-def _looks_like_url(value: str | None) -> bool:
-    return bool(_normalize_endpoint_to_url(value))
-
-
-def _resolve_model_used(
+def _resolve_model_used_fresh(
     resolved_model_cli: str,
-    model_from_url: str,
-    model_from_slurm: str,
     model_arg: str,
     endpoint_candidates: list[str],
+    timeout_seconds: float = 10.0,
 ) -> str:
-    """Resolve final MODEL_USED value while avoiding raw URL values.
+    """Resolve MODEL_USED from deterministic sources only.
 
-    Priority:
-    1) Explicit resolved model from CLI/env.
-    2) Queried model from endpoint metadata.
-    3) Model parsed from Slurm logs.
-    4) Model argument (unless it is a URL; in that case query it first).
+    Order:
+    1) A resolved model provided by caller (if not endpoint-like).
+    2) Query endpoint(s) via /v1/models and wait for response.
+    3) Use MODEL arg only when it is already a model id (not endpoint-like).
     """
     cli_model = (resolved_model_cli or "").strip()
-    # Ignore URL-like values (e.g. host:port) passed through CLI resolver.
-    # They are transport endpoints, not actual model identifiers.
-    if cli_model and not _looks_like_url(cli_model):
+    if cli_model and not _is_endpoint_like(cli_model):
         return cli_model
 
-    if (model_from_url or "").strip():
-        return model_from_url.strip()
-
-    if (model_from_slurm or "").strip():
-        return model_from_slurm.strip()
+    query_targets: list[str] = []
+    for endpoint in endpoint_candidates:
+        normalized = _normalize_endpoint_value(endpoint)
+        if normalized:
+            query_targets.append(normalized)
 
     model_raw = (model_arg or "").strip()
-    if not model_raw:
-        return ""
+    if model_raw and _is_endpoint_like(model_raw):
+        query_targets.append(model_raw)
 
-    if _looks_like_url(model_raw):
-        # Last chance: MODEL positional arg itself may be a URL.
-        queried = _extract_model_from_url(model_raw)
-        if queried:
-            return queried.strip()
+    for endpoint in query_targets:
+        resolved = _query_model_id_from_endpoint(endpoint, timeout_seconds=timeout_seconds)
+        if resolved:
+            return resolved
 
-        # Reuse any known endpoints as fallback probes.
-        for endpoint_value in endpoint_candidates:
-            queried = _extract_model_from_url(endpoint_value)
-            if queried:
-                return queried.strip()
+    if model_raw and not _is_endpoint_like(model_raw):
+        return model_raw
 
-        # Keep CSV clean: if unresolved and value is URL, avoid storing URL itself.
-        return ""
-
-    return model_raw
+    return ""
 
 def _extract_median_tokens_from_log(slurm_path: str | None) -> str | None:
     """Parse the latest 'Median tokens per response: <value>' printed by experiment_automation.
@@ -1061,7 +933,7 @@ def main():
         ]
 
         # Some launch paths pass the endpoint in MODEL positional arg.
-        if _looks_like_url(model):
+        if _is_endpoint_like(model):
             endpoint_candidates.append(model)
         url = ''
         for endpoint_value in endpoint_candidates:
@@ -1070,27 +942,12 @@ def main():
                 url = normalized
                 break
 
-        # Resolve model from endpoint metadata when possible.
-        model_from_url = ''
-        if not (resolved_model_cli or '').strip():
-            for endpoint_value in endpoint_candidates:
-                model_from_url = _extract_model_from_url(endpoint_value)
-                if model_from_url:
-                    break
-            if not model_from_url:
-                for endpoint_value in endpoint_candidates:
-                    hint = _model_hint_from_endpoint_value(endpoint_value)
-                    if hint:
-                        model_from_url = hint
-                        break
-
         # Prompt token count: use median across prompts in requests
         prompt_token_count = _compute_median_prompt_tokens()
 
         # Job ID and Slurm model extraction
         job_id_env = os.environ.get('SLURM_JOB_ID')
         job_id, slurm_path = _find_slurm_log(job_id_env)
-        model_from_slurm = _extract_model_from_slurm(slurm_path)
 
         # Median response tokens: prefer CLI-provided value from experiment_automation;
         # fall back to log-parsed value, then computed from results.json/output.csv
@@ -1117,12 +974,11 @@ def main():
         output_token_percentiles = stats.get("output_token_percentiles")
         request_total_token_percentiles = stats.get("request_total_token_percentiles")
 
-        model_used = _resolve_model_used(
+        model_used = _resolve_model_used_fresh(
             resolved_model_cli=resolved_model_cli,
-            model_from_url=model_from_url,
-            model_from_slurm=model_from_slurm,
             model_arg=model,
             endpoint_candidates=endpoint_candidates,
+            timeout_seconds=float(os.environ.get('MODEL_DISCOVERY_TIMEOUT', '10')),
         )
 
         # Create new CSV file
