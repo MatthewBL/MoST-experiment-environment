@@ -57,6 +57,3 @@ Here you will find a few more pieces of information regarding how the experiment
 
 ### What is the prompt?
 Prompts are loaded directly from the JSONL dataset file specified by `PROMPTS_FILE` (defaults to [oasst_roots_en_max1000_tokens.jsonl](oasst_roots_en_max1000_tokens.jsonl)). During request generation (`fmperf.loadgen.generate-input`), the prompt pool is filtered by the input token interval (`MIN_INPUT_TOKENS`/`MAX_INPUT_TOKENS`). Output token behavior remains unchanged and is sampled within `MIN_OUTPUT_TOKENS`/`MAX_OUTPUT_TOKENS`.
-
-### Why do I see empty folders with names such as 128_128?
-These are placeholder folders where the results of the experiment are stored before being moved to their corresponding location within the /requests folder.

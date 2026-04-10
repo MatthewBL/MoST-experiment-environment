@@ -753,8 +753,6 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         input_interval = tokens[0]
         output_interval = tokens[1]
         interval_strs = (str(tokens[0]), str(tokens[1]))
-    os.makedirs(parent_dir, exist_ok=True)
-    print(f"Created parent directory: {parent_dir}")
     
     # Step 1: Initialize stage 1
     stage = start_stage_1()
