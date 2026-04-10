@@ -48,11 +48,36 @@ def _model_hint_from_endpoint_value(value: str | None) -> str:
             parts = [p for p in path.split("/") if p and p not in ("v1", "chat", "completions", "generate", "models")]
             if parts:
                 return parts[-1]
-        host = parsed.netloc.split(":", 1)[0].strip()
-        return host
+        return ""
 
     # Plain identifier like service/model name.
     return endpoint
+
+
+def _normalize_endpoint_to_url(value: str | None) -> str:
+    """Normalize endpoint values into an absolute URL when possible.
+
+    Accepts values such as:
+    - http://host:port
+    - https://host/path
+    - host:port
+    - host:port/path
+    """
+    endpoint = _normalize_endpoint_value(value)
+    if not endpoint:
+        return ""
+
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme and parsed.netloc:
+        return endpoint
+
+    # Common case from .env / runner: host:port[/path] without scheme.
+    if " " in endpoint:
+        return ""
+    if ":" in endpoint and not endpoint.startswith("/"):
+        return f"http://{endpoint}"
+
+    return ""
 
 def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     """Return (job_id, slurm_log_path) if found.
@@ -229,14 +254,9 @@ def _build_model_probe_urls(url: str) -> list[str]:
 
 def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> str:
     """Fetch model name from URL by probing common metadata endpoints."""
-    endpoint = _normalize_endpoint_value(url)
+    endpoint = _normalize_endpoint_to_url(url)
     if not endpoint:
         return ""
-
-    # If endpoint is not an absolute URL, treat it as a direct model/service hint.
-    parsed = urllib.parse.urlparse(endpoint)
-    if not parsed.scheme:
-        return _model_hint_from_endpoint_value(endpoint)
 
     for probe_url in _build_model_probe_urls(endpoint):
         try:
@@ -270,11 +290,7 @@ def _extract_model_from_url(url: str | None, timeout_seconds: float = 5.0) -> st
 
 
 def _looks_like_url(value: str | None) -> bool:
-    s = _normalize_endpoint_value(value)
-    if not s:
-        return False
-    parsed = urllib.parse.urlparse(s)
-    return bool(parsed.scheme and parsed.netloc)
+    return bool(_normalize_endpoint_to_url(value))
 
 
 def _resolve_model_used(
