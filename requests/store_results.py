@@ -309,7 +309,9 @@ def _resolve_model_used(
     4) Model argument (unless it is a URL; in that case query it first).
     """
     cli_model = (resolved_model_cli or "").strip()
-    if cli_model:
+    # Ignore URL-like values (e.g. host:port) passed through CLI resolver.
+    # They are transport endpoints, not actual model identifiers.
+    if cli_model and not _looks_like_url(cli_model):
         return cli_model
 
     if (model_from_url or "").strip():
