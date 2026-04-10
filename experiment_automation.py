@@ -795,6 +795,10 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     # Bounds tracking for stage 1
     highest_true = None  # Highest req_min that yielded TRUE
     lowest_false = None  # Lowest req_min that yielded FALSE
+
+    # Global per-experiment extrema requested for results.csv output.
+    largest_true_seen = None
+    smallest_false_seen = None
     
     # Retry counters for stage 1 and stage 2
     retry_count_stage1 = 0
@@ -891,6 +895,12 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             return {"aborted": True, "reason": reason}
         # Capture the REQ_MIN used for this evaluation before any update logic
         req_min_used = req_min
+        if evaluation_result:
+            if largest_true_seen is None or req_min_used > largest_true_seen:
+                largest_true_seen = req_min_used
+        else:
+            if smallest_false_seen is None or req_min_used < smallest_false_seen:
+                smallest_false_seen = req_min_used
         median_resp_tokens, total_completed_requests = _compute_median_response_tokens()
         requests_per_sec = None
         if duration_seconds and total_completed_requests is not None:
@@ -1049,6 +1059,9 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             os.chdir('requests')
             evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
+            largest_true_str = '' if largest_true_seen is None else str(largest_true_seen)
+            smallest_false_str = '' if smallest_false_seen is None else str(smallest_false_seen)
+            finished_flag_str = 'TRUE' if stop_after_persist else 'FALSE'
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
                 "python", "-u", "store_results.py",
@@ -1058,6 +1071,9 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 str(termination_reason),
                 str(binary_distance_abs),
                 str(binary_distance_rel),
+                largest_true_str,
+                smallest_false_str,
+                finished_flag_str,
             ]
             print("Running (args):", " ".join(store_args))
             subprocess.run(store_args)

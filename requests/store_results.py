@@ -804,6 +804,9 @@ def main():
         termination_reason = ''
         binary_distance_abs = ''
         binary_distance_rel = ''
+        largest_true = ''
+        smallest_false = ''
+        finished_flag = ''
 
         if is_compact_cli:
             model = args[0]
@@ -830,6 +833,12 @@ def main():
                 binary_distance_abs = args[10]
             if len(args) >= 12:
                 binary_distance_rel = args[11]
+            if len(args) >= 13:
+                largest_true = args[12]
+            if len(args) >= 14:
+                smallest_false = args[13]
+            if len(args) >= 15:
+                finished_flag = args[14]
         elif len(args) >= 10:
             # Backward-compatible parsing for legacy positional arguments.
             model = args[0]
@@ -856,6 +865,12 @@ def main():
                 binary_distance_abs = args[13]
             if len(args) >= 15:
                 binary_distance_rel = args[14]
+            if len(args) >= 16:
+                largest_true = args[15]
+            if len(args) >= 17:
+                smallest_false = args[16]
+            if len(args) >= 18:
+                finished_flag = args[17]
         else:
             # Environment variables set in-process by experiment_automation.py
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
@@ -868,6 +883,15 @@ def main():
             termination_reason = os.environ.get('TERMINATION_REASON', '')
             binary_distance_abs = os.environ.get('BINARY_SEARCH_DISTANCE', '')
             binary_distance_rel = os.environ.get('BINARY_SEARCH_RELATIVE_DISTANCE', '')
+            largest_true = os.environ.get('LARGEST_TRUE', '')
+            smallest_false = os.environ.get('SMALLEST_FALSE', '')
+            finished_flag = os.environ.get('FINISHED', '')
+
+        # Normalize finished flag to TRUE/FALSE if possible.
+        if str(finished_flag).strip().lower() in {'true', '1', 'yes'}:
+            finished_flag = 'TRUE'
+        elif str(finished_flag).strip().lower() in {'false', '0', 'no'}:
+            finished_flag = 'FALSE'
 
         # Create the full directory path
         if parent_dir:
@@ -998,7 +1022,8 @@ def main():
                 "INPUT_TOKEN_VARIANCE", "OUTPUT_TOKEN_VARIANCE",
                 "INPUT_TOKEN_PERCENTILES", "OUTPUT_TOKEN_PERCENTILES", "REQUEST_TOTAL_TOKEN_PERCENTILES",
                 "ADDITIVE_EXPECTED_PROPORTIONS", "ADDITIVE_TRUE_PROPORTIONS",
-                "TERMINATION_REASON", "BINARY_SEARCH_DISTANCE", "BINARY_SEARCH_RELATIVE_DISTANCE"
+                "TERMINATION_REASON", "BINARY_SEARCH_DISTANCE", "BINARY_SEARCH_RELATIVE_DISTANCE",
+                "LARGEST_TRUE", "SMALLEST_FALSE", "FINISHED"
             ])
             # Write data row
             writer.writerow([
@@ -1031,6 +1056,9 @@ def main():
                 termination_reason or '',
                 binary_distance_abs or '',
                 binary_distance_rel or '',
+                largest_true or '',
+                smallest_false or '',
+                finished_flag or '',
             ])
         
         print(f"Created results.csv in {full_dir_path}")
