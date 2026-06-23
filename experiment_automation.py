@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import sys
 from collections import defaultdict
 from pathlib import Path
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
@@ -77,7 +78,50 @@ def _parse_int_list(value):
         except ValueError:
             # skip malformed entries
             continue
-    return items
+def load_use_cases_from_yaml(yaml_path):
+    import yaml
+    if not yaml_path:
+        return []
+    path = Path(yaml_path)
+    if not path.is_absolute():
+        path = (Path(__file__).parent / path).resolve()
+    if not path.exists():
+        print(f"Warning: Use cases YAML file not found: {path}")
+        return []
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Preprocess colons without space (e.g. key:value -> key: value)
+        lines = []
+        for l in content.splitlines():
+            if ':' in l:
+                parts = l.split(':', 1)
+                if not parts[1].startswith(' '):
+                    l = f"{parts[0]}: {parts[1]}"
+            lines.append(l)
+        normalized = '\n'.join(lines)
+        data = yaml.safe_load(normalized)
+        
+        # Normalize to list of dicts
+        use_cases = []
+        if isinstance(data, dict):
+            if 'useCase' in data:
+                use_cases = [data['useCase']]
+            elif 'useCases' in data:
+                val = data['useCases']
+                if isinstance(val, list):
+                    use_cases = val
+                else:
+                    use_cases = [val]
+            else:
+                use_cases = [data]
+        elif isinstance(data, list):
+            use_cases = data
+        return use_cases
+    except Exception as e:
+        print(f"Error loading use cases from YAML: {e}")
+        return []
 
 def load_env_config():
     """Load configuration from .env file and return a dict.
@@ -99,6 +143,8 @@ def load_env_config():
         'DURATION': None,
         'ITERATION_COOLDOWN_SECONDS': 180.0,
         'ITERATION_HARD_LIMIT': 15,
+        'SERVICE_TYPE': 'LLM',
+        'USE_CASES_YAML': None,
     }
 
     if env_path.exists():
@@ -112,6 +158,10 @@ def load_env_config():
                 val = val.strip()
                 if key == 'TOKENS_LIST':
                     config['TOKENS_LIST'] = _parse_tokens_list(val)
+                elif key == 'SERVICE_TYPE':
+                    config['SERVICE_TYPE'] = val.strip()
+                elif key == 'USE_CASES_YAML':
+                    config['USE_CASES_YAML'] = val.strip()
                 elif key == 'REQ_MIN_START':
                     lst = _parse_int_list(val)
                     # Backwards compatibility: if parsing produced empty but val is a single int, wrap it
@@ -516,15 +566,18 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
 
     # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
     if input_interval is not None:
-        if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
-            in_min, in_max = int(input_interval[0]), int(input_interval[1])
+        if os.environ.get('SERVICE_TYPE') == 'SaaS':
+            os.environ['REQUESTS_FILENAME'] = REQUESTS_FILENAME
         else:
-            in_min = in_max = int(input_interval)
-        base_filename = _get_requests_filename_base()
-        name, ext = os.path.splitext(base_filename)
-        if not ext:
-            ext = '.json'
-        os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
+            if isinstance(input_interval, (list, tuple)) and len(input_interval) >= 2:
+                in_min, in_max = int(input_interval[0]), int(input_interval[1])
+            else:
+                in_min = in_max = int(input_interval)
+            base_filename = _get_requests_filename_base()
+            name, ext = os.path.splitext(base_filename)
+            if not ext:
+                ext = '.json'
+            os.environ['REQUESTS_FILENAME'] = f"{name}_{in_min}-{in_max}{ext}"
 
 def run_command(command, wait=True, fail_on_error=False):
     """Run a shell command and wait for completion.
@@ -553,7 +606,7 @@ def run_command_capture(command):
 def run_evaluation_pipeline(experiment_type):
     """Run the evaluation pipeline steps 3-7 and return throughput metric."""
     # Step 3: Run loadgen
-    run_command("python -u -m fmperf.loadgen.run", fail_on_error=True)
+    run_command(f'"{sys.executable}" -u -m fmperf.loadgen.run', fail_on_error=True)
     
     # Step 4: Change to requests directory
     original_dir = os.getcwd()
@@ -561,13 +614,13 @@ def run_evaluation_pipeline(experiment_type):
     
     try:
         # Step 5: Convert to CSV
-        run_command("python -u convert_to_csv.py")
+        run_command(f'"{sys.executable}" -u convert_to_csv.py')
         
         # Early metrics check before splitting results (invoke analyze_metrics.py as a script)
         early_fail = False
         median_resp_per_min = None
         try:
-            code, out, err = run_command_capture("python -u analyze_metrics.py .")
+            code, out, err = run_command_capture(f'"{sys.executable}" -u analyze_metrics.py .')
             if code == 0:
                 avg_resp = 0.0
                 for line in out.splitlines():
@@ -600,7 +653,7 @@ def run_evaluation_pipeline(experiment_type):
             early_fail = False
         
         # Step 6: Split results
-        run_command("python -u split_results.py")
+        run_command(f'"{sys.executable}" -u split_results.py')
         
         # Step 7: Run evaluation (skip if early failure triggered)
         if early_fail:
@@ -610,7 +663,7 @@ def run_evaluation_pipeline(experiment_type):
             # MIT experiments rely on throughput plateau detection later
             evaluation_success = True
         else:
-            result = run_command("python -u evaluate.py", wait=True)
+            result = run_command(f'"{sys.executable}" -u evaluate.py', wait=True)
             # Evaluation.py returns 0 for success, non-zero for failure
             evaluation_success = (result.returncode == 0)
         
@@ -746,32 +799,43 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     print(f"Stored configuration - MODEL: {model}")
 
     # Resolve model once per token experiment to avoid repeated URL probing downstream.
-    endpoint_candidates = [
-        os.environ.get('URL', ''),
-        os.environ.get('FMPERF_ENDPOINT_URL', ''),
-        os.environ.get('ENDPOINT_URL', ''),
-        _read_env_value(Path('.env'), 'URL', ''),
-        _read_env_value(Path('.env'), 'FMPERF_ENDPOINT_URL', ''),
-    ]
-    model_from_url = ''
-    for endpoint_value in endpoint_candidates:
-        model_from_url = _extract_model_from_url(endpoint_value)
-        if model_from_url:
-            break
-    if not model_from_url:
-        # Last resort: endpoint value itself can still be informative.
+    if os.environ.get('SERVICE_TYPE') == 'SaaS':
+        model_from_url = 'SaaS'
+    else:
+        endpoint_candidates = [
+            os.environ.get('URL', ''),
+            os.environ.get('FMPERF_ENDPOINT_URL', ''),
+            os.environ.get('ENDPOINT_URL', ''),
+            _read_env_value(Path('.env'), 'URL', ''),
+            _read_env_value(Path('.env'), 'FMPERF_ENDPOINT_URL', ''),
+        ]
+        model_from_url = ''
         for endpoint_value in endpoint_candidates:
-            hint = _model_hint_from_endpoint_value(endpoint_value)
-            if hint:
-                model_from_url = hint
+            model_from_url = _extract_model_from_url(endpoint_value)
+            if model_from_url:
                 break
+        if not model_from_url:
+            # Last resort: endpoint value itself can still be informative.
+            for endpoint_value in endpoint_candidates:
+                hint = _model_hint_from_endpoint_value(endpoint_value)
+                if hint:
+                    model_from_url = hint
+                    break
     if model_from_url:
         os.environ['MODEL_USED_RESOLVED'] = model_from_url
         print(f"Resolved model from URL metadata: {model_from_url}")
     
     # Create parent directory for this token pair
     # tokens can be [in_min,in_max,out_min,out_max] or [in,out]
-    if len(tokens) >= 4:
+    if os.environ.get('SERVICE_TYPE') == 'SaaS':
+        use_case_id = tokens[0]
+        parent_dir = use_case_id
+        input_interval = 'SaaS'
+        output_interval = 'SaaS'
+        interval_strs = (use_case_id, 'SaaS')
+        in_min = in_max = 0
+        out_min = out_max = 0
+    elif len(tokens) >= 4:
         in_min, in_max, out_min, out_max = tokens[0], tokens[1], tokens[2], tokens[3]
         parent_dir = f"{in_min}-{in_max}_{out_min}-{out_max}"
         input_interval = (in_min, in_max)
@@ -795,7 +859,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     # Bounds tracking for stage 1
     highest_true = None  # Highest req_min that yielded TRUE
     lowest_false = None  # Lowest req_min that yielded FALSE
-
+ 
     # Global per-experiment extrema requested for results.csv output.
     largest_true_seen = None
     smallest_false_seen = None
@@ -807,7 +871,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     
     max_iterations = 100  # Safety limit to prevent infinite loops
     iteration = 0
-
+ 
     # Set process env for the initial request generation without modifying .env
     set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
     requests_dir = Path('requests')
@@ -816,29 +880,38 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     if sample_file.exists():
         sample_file.unlink()
     os.chdir('..')
-    # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
-    req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-    req_path = Path(REQUESTS_DIR) / req_filename
-    if req_path.is_file():
-        print(f"Found existing workload: {req_path}. Using cached file.")
+    
+    if os.environ.get('SERVICE_TYPE') == 'SaaS':
+        # Create a dummy sample_requests.json if it doesn't exist to satisfy loadgen load phase
+        req_path = Path(REQUESTS_DIR) / REQUESTS_FILENAME
+        req_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(req_path, 'w', encoding='utf-8') as f:
+            json.dump([{"request": {}, "expected": []}], f)
+        print(f"Bypassing generation; created dummy SaaS workload: {req_path}")
     else:
-        prompts_path = REQUESTS_PROMPTS_FILE.resolve()
-        if not prompts_path.exists():
-            raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
-        command = (
-            f'python -u generate_requests.py {in_min} {in_max} '
-            f'--prompts-file "{prompts_path}" '
-            f'--output "{req_path}"'
-        )
-        if out_min is not None and out_max is not None:
-            command += f" --min-output {out_min} --max-output {out_max}"
-        run_command(command, wait=True)
+        # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
+        req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
+        req_path = Path(REQUESTS_DIR) / req_filename
         if req_path.is_file():
-            print(f"Generated workload: {req_path}")
+            print(f"Found existing workload: {req_path}. Using cached file.")
         else:
-            raise FileNotFoundError(
-                f"Workload generation failed; expected file not found: {req_path}"
+            prompts_path = REQUESTS_PROMPTS_FILE.resolve()
+            if not prompts_path.exists():
+                raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
+            command = (
+                f'python -u generate_requests.py {in_min} {in_max} '
+                f'--prompts-file "{prompts_path}" '
+                f'--output "{req_path}"'
             )
+            if out_min is not None and out_max is not None:
+                command += f" --min-output {out_min} --max-output {out_max}"
+            run_command(command, wait=True)
+            if req_path.is_file():
+                print(f"Generated workload: {req_path}")
+            else:
+                raise FileNotFoundError(
+                    f"Workload generation failed; expected file not found: {req_path}"
+                )
     
     def _compute_median_response_tokens():
         """Compute (median tokens per response, total completed requests)."""
@@ -1065,7 +1138,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             finished_flag_str = 'TRUE' if stop_after_persist else 'FALSE'
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
-                "python", "-u", "store_results.py",
+                sys.executable, "-u", "store_results.py",
                 str(model), str(stage), str(parent_dir),
                 str(interval_strs[0]), str(interval_strs[1]), str(req_min_for_store), str(evaluation_flag), str(median_str),
                 str(os.environ.get('MODEL_USED_RESOLVED', '')),
@@ -1095,38 +1168,84 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     return None
 
 def main():
-    input_output_tokens = CONFIG.get('TOKENS_LIST', [])
-    req_min_starts = CONFIG.get('REQ_MIN_START', [1])
-    results = {}
+    service_type = CONFIG.get('SERVICE_TYPE', 'LLM')
     
-    for idx, tokens in enumerate(input_output_tokens):
+    if service_type == 'SaaS':
+        yaml_path = CONFIG.get('USE_CASES_YAML')
+        use_cases = load_use_cases_from_yaml(yaml_path)
+        if not use_cases:
+            print("Error: No use cases found for SaaS mode.")
+            return {}
+        
+        req_min_starts = CONFIG.get('REQ_MIN_START', [1])
+        results = {}
+        
+        for idx, uc in enumerate(use_cases):
+            use_case_id = uc.get('id', f'usecase_{idx}')
+            print(f"\n{'='*60}")
+            print(f"Starting experiment for SaaS Use Case: {use_case_id}")
+            print(f"{'='*60}")
+            
+            if req_min_starts:
+                initial_req_min = req_min_starts[idx] if idx < len(req_min_starts) else req_min_starts[-1]
+            else:
+                initial_req_min = 1
+            
+            os.environ['ACTIVE_USE_CASE_ID'] = use_case_id
+            os.environ['SERVICE_TYPE'] = 'SaaS'
+            os.environ['USE_CASES_YAML'] = str(yaml_path)
+            
+            # Map parameters to run_experiment_for_tokens
+            result = run_experiment_for_tokens((use_case_id, 'SaaS'), initial_req_min)
+            results[use_case_id] = result
+            
+            if isinstance(result, dict) and result.get("aborted"):
+                print("Aborted remaining experiments after fatal pipeline error.")
+                break
+                
+            print(f"\nCompleted experiment for SaaS Use Case: {use_case_id}")
+            print(f"Result: {result}")
+        
         print(f"\n{'='*60}")
-        print(f"Starting experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
+        print("ALL SaaS EXPERIMENTS COMPLETED")
         print(f"{'='*60}")
+        for uc_id, result in results.items():
+            print(f"Use Case {uc_id}: {result}")
+        return results
+    else:
+        input_output_tokens = CONFIG.get('TOKENS_LIST', [])
+        req_min_starts = CONFIG.get('REQ_MIN_START', [1])
+        results = {}
         
-        # Pick initial REQ_MIN by index; if not enough values, use the last one
-        if req_min_starts:
-            initial_req_min = req_min_starts[idx] if idx < len(req_min_starts) else req_min_starts[-1]
-        else:
-            initial_req_min = 1
-        
-        result = run_experiment_for_tokens(tokens, initial_req_min)
-        results[f"{tokens[0]}_{tokens[1]}"] = result
+        for idx, tokens in enumerate(input_output_tokens):
+            print(f"\n{'='*60}")
+            print(f"Starting experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
+            print(f"{'='*60}")
+            
+            # Pick initial REQ_MIN by index; if not enough values, use the last one
+            if req_min_starts:
+                initial_req_min = req_min_starts[idx] if idx < len(req_min_starts) else req_min_starts[-1]
+            else:
+                initial_req_min = 1
+            
+            os.environ['SERVICE_TYPE'] = 'LLM'
+            result = run_experiment_for_tokens(tokens, initial_req_min)
+            results[f"{tokens[0]}_{tokens[1]}"] = result
 
-        if isinstance(result, dict) and result.get("aborted"):
-            print("Aborted remaining experiments after fatal pipeline error.")
-            break
+            if isinstance(result, dict) and result.get("aborted"):
+                print("Aborted remaining experiments after fatal pipeline error.")
+                break
+            
+            print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
+            print(f"Result: {result}")
         
-        print(f"\nCompleted experiment for INPUT_TOKENS={tokens[0]}, OUTPUT_TOKENS={tokens[1]}")
-        print(f"Result: {result}")
-    
-    print(f"\n{'='*60}")
-    print("ALL EXPERIMENTS COMPLETED")
-    print(f"{'='*60}")
-    for token_combo, result in results.items():
-        print(f"Tokens {token_combo}: {result}")
-    
-    return results
+        print(f"\n{'='*60}")
+        print("ALL EXPERIMENTS COMPLETED")
+        print(f"{'='*60}")
+        for token_combo, result in results.items():
+            print(f"Tokens {token_combo}: {result}")
+        
+        return results
 
 if __name__ == "__main__":
     try:
