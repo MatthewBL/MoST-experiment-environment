@@ -10,7 +10,7 @@ import urllib.request
 import sys
 from collections import defaultdict
 from pathlib import Path
-from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
+from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, REQUESTS_PATH
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
 
@@ -883,7 +883,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     
     if os.environ.get('SERVICE_TYPE') == 'SaaS':
         # Create a dummy sample_requests.json if it doesn't exist to satisfy loadgen load phase
-        req_path = Path(REQUESTS_DIR) / REQUESTS_FILENAME
+        req_path = Path(REQUESTS_PATH)
         req_path.parent.mkdir(parents=True, exist_ok=True)
         with open(req_path, 'w', encoding='utf-8') as f:
             json.dump([{"request": {}, "expected": []}], f)
@@ -891,7 +891,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     else:
         # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
         req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-        req_path = Path(REQUESTS_DIR) / req_filename
+        req_path = Path(REQUESTS_PATH)
         if req_path.is_file():
             print(f"Found existing workload: {req_path}. Using cached file.")
         else:
