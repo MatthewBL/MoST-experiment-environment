@@ -10,7 +10,7 @@ import urllib.request
 import sys
 from collections import defaultdict
 from pathlib import Path
-from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, REQUESTS_PATH
+from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, RESULTS_DIR
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
 
@@ -438,7 +438,7 @@ def _get_iteration_hard_limit():
 
 def _compute_success_rate_from_results():
     """Compute overall success rate (%) directly from results payload."""
-    results_path = Path(REQUESTS_DIR) / RESULTS_FILENAME
+    results_path = Path(RESULTS_DIR) / RESULTS_FILENAME
     if not results_path.exists():
         return None
     try:
@@ -494,7 +494,7 @@ def _check_success_rate_threshold(threshold=None, prefer_results_json=False):
         print("Warning: unable to compute success rate from results payload; falling back to CSV inspection.")
 
     csv_names = ("first_half.csv", "second_half.csv")
-    base_dir = Path('requests')
+    base_dir = Path(RESULTS_DIR)
     for name in csv_names:
         path = base_dir / name
         if not path.exists():
@@ -605,22 +605,29 @@ def run_command_capture(command):
 
 def run_evaluation_pipeline(experiment_type):
     """Run the evaluation pipeline steps 3-7 and return throughput metric."""
+    scripts_dir = Path(__file__).resolve().parent / 'requests'
+    convert_to_csv_script = scripts_dir / 'convert_to_csv.py'
+    analyze_metrics_script = scripts_dir / 'analyze_metrics.py'
+    split_results_script = scripts_dir / 'split_results.py'
+    evaluate_script = scripts_dir / 'evaluate.py'
+
     # Step 3: Run loadgen
     run_command(f'"{sys.executable}" -u -m fmperf.loadgen.run', fail_on_error=True)
     
-    # Step 4: Change to requests directory
+    # Step 4: Change to results directory
     original_dir = os.getcwd()
-    os.chdir('requests')
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.chdir(RESULTS_DIR)
     
     try:
         # Step 5: Convert to CSV
-        run_command(f'"{sys.executable}" -u convert_to_csv.py')
+        run_command(f'"{sys.executable}" -u "{convert_to_csv_script}"')
         
         # Early metrics check before splitting results (invoke analyze_metrics.py as a script)
         early_fail = False
         median_resp_per_min = None
         try:
-            code, out, err = run_command_capture(f'"{sys.executable}" -u analyze_metrics.py .')
+            code, out, err = run_command_capture(f'"{sys.executable}" -u "{analyze_metrics_script}" .')
             if code == 0:
                 avg_resp = 0.0
                 for line in out.splitlines():
@@ -653,7 +660,7 @@ def run_evaluation_pipeline(experiment_type):
             early_fail = False
         
         # Step 6: Split results
-        run_command(f'"{sys.executable}" -u split_results.py')
+        run_command(f'"{sys.executable}" -u "{split_results_script}"')
         
         # Step 7: Run evaluation (skip if early failure triggered)
         if early_fail:
@@ -663,7 +670,7 @@ def run_evaluation_pipeline(experiment_type):
             # MIT experiments rely on throughput plateau detection later
             evaluation_success = True
         else:
-            result = run_command(f'"{sys.executable}" -u evaluate.py', wait=True)
+            result = run_command(f'"{sys.executable}" -u "{evaluate_script}"', wait=True)
             # Evaluation.py returns 0 for success, non-zero for failure
             evaluation_success = (result.returncode == 0)
         
@@ -874,16 +881,13 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
  
     # Set process env for the initial request generation without modifying .env
     set_process_env_for_run(req_min, input_interval=input_interval, output_interval=output_interval)
-    requests_dir = Path('requests')
-    os.chdir(requests_dir)
-    sample_file = Path('sample_requests.json')
+    sample_file = Path(REQUESTS_DIR) / 'sample_requests.json'
     if sample_file.exists():
         sample_file.unlink()
-    os.chdir('..')
     
     if os.environ.get('SERVICE_TYPE') == 'SaaS':
         # Create a dummy sample_requests.json if it doesn't exist to satisfy loadgen load phase
-        req_path = Path(REQUESTS_PATH)
+        req_path = Path(REQUESTS_DIR) / REQUESTS_FILENAME
         req_path.parent.mkdir(parents=True, exist_ok=True)
         with open(req_path, 'w', encoding='utf-8') as f:
             json.dump([{"request": {}, "expected": []}], f)
@@ -891,10 +895,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     else:
         # Skip generation if interval-specific file already exists (uses REQUESTS_FILENAME with input suffix)
         req_filename = os.environ.get('REQUESTS_FILENAME', REQUESTS_FILENAME)
-        req_path = Path(REQUESTS_PATH)
+        req_path = Path(REQUESTS_DIR) / req_filename
         if req_path.is_file():
             print(f"Found existing workload: {req_path}. Using cached file.")
         else:
+            print(f"Not found workload: {req_path}. Generating new workload for input tokens {in_min}-{in_max}...")
             prompts_path = REQUESTS_PROMPTS_FILE.resolve()
             if not prompts_path.exists():
                 raise FileNotFoundError(f"Prompts dataset missing: {prompts_path}")
@@ -916,7 +921,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     def _compute_median_response_tokens():
         """Compute (median tokens per response, total completed requests)."""
         try:
-            results_path = os.path.join(REQUESTS_DIR, RESULTS_FILENAME)
+            results_path = os.path.join(RESULTS_DIR, RESULTS_FILENAME)
             with open(results_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             rows = payload["results"] if isinstance(payload, dict) and "results" in payload else payload
@@ -1130,7 +1135,9 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         # Persist results with explicit values, including the printed median
         try:
             original_dir2 = os.getcwd()
-            os.chdir('requests')
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            os.chdir(RESULTS_DIR)
+            store_results_script = Path(__file__).resolve().parent / 'requests' / 'store_results.py'
             evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
             largest_true_str = '' if largest_true_seen is None else str(largest_true_seen)
@@ -1138,7 +1145,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             finished_flag_str = 'TRUE' if stop_after_persist else 'FALSE'
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
-                sys.executable, "-u", "store_results.py",
+                sys.executable, "-u", str(store_results_script),
                 str(model), str(stage), str(parent_dir),
                 str(interval_strs[0]), str(interval_strs[1]), str(req_min_for_store), str(evaluation_flag), str(median_str),
                 str(os.environ.get('MODEL_USED_RESOLVED', '')),

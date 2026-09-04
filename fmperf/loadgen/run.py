@@ -15,7 +15,7 @@ from fmperf.utils import parse_results
 from datetime import datetime
 from pathlib import Path
 from .collect_energy import collect_metrics, summarize_energy
-from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
+from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, RESULTS_DIR
 import threading
 import itertools
 import math
@@ -204,7 +204,8 @@ def run(result_filename=None):
     output_token_override = _get_output_token_override_bounds()
 
     infile = os.path.join(REQUESTS_DIR, REQUESTS_FILENAME)
-    outfile = os.path.join(REQUESTS_DIR, result_filename)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    outfile = os.path.join(RESULTS_DIR, result_filename)
     target = os.environ.get("TARGET", "vllm")
     api_url = os.environ["URL"]
     model_discovery_timeout = float(os.environ.get("MODEL_DISCOVERY_TIMEOUT", "10"))
@@ -362,11 +363,11 @@ def run(result_filename=None):
                             json_body = {}
                     
                     # Construct URL
-                    api_url = os.environ["URL"]
-                    if not api_url.startswith("http://") and not api_url.startswith("https://"):
-                        api_url = f"http://{api_url}"
+                    endpoint_base_url = os.environ["URL"]
+                    if not endpoint_base_url.startswith("http://") and not endpoint_base_url.startswith("https://"):
+                        endpoint_base_url = f"http://{endpoint_base_url}"
                     
-                    full_url = f"{api_url.rstrip('/')}/{path.lstrip('/')}"
+                    full_url = f"{endpoint_base_url.rstrip('/')}/{path.lstrip('/')}"
                     
                     ok = False
                     error_msg = "None"

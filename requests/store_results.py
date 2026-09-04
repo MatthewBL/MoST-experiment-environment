@@ -766,8 +766,22 @@ def _derive_directory_name() -> tuple[str, str]:
             return _sanitize_dir_component(raw), candidate.name
     return datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S"), "current_time"
 
+
+def _resolve_results_dir() -> Path:
+    root_dir = Path(__file__).resolve().parent.parent
+    env_path = root_dir / '.env'
+    results_dir = os.environ.get('RESULTS_DIR') or _read_env_value(env_path, 'RESULTS_DIR', 'results')
+    p = Path(results_dir)
+    if not p.is_absolute():
+        p = root_dir / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
 def main():
     try:
+        results_dir = _resolve_results_dir()
+        os.chdir(results_dir)
+
         # Check if required CSV files exist
         if not os.path.exists("output.csv"):
             print("Error: output.csv not found")

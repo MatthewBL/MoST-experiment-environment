@@ -5,6 +5,6 @@ load_dotenv()
 
 REQUESTS_DIR = os.environ.get("REQUESTS_DIR", ".")
 REQUESTS_FILENAME = os.environ["REQUESTS_FILENAME"]
-REQUESTS_PATH = os.environ.get("REQUESTS_PATH", os.path.join(REQUESTS_DIR, REQUESTS_FILENAME))
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "results")
 RESULTS_ALL_FILENAME = os.environ.get("RESULTS_ALL_FILENAME", None)
 RESULTS_FILENAME = os.environ.get("RESULTS_FILENAME", None)

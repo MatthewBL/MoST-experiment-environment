@@ -1,8 +1,38 @@
 import json
 import csv
 import argparse
+import os
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+
+
+def _read_env_value(env_path: Path, key: str, default: str = "") -> str:
+    try:
+        if env_path.exists():
+            with env_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[len("export "):].strip()
+                    if line.startswith(key + "="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return default
+
+
+def _resolve_results_dir() -> Path:
+    root_dir = Path(__file__).resolve().parent.parent
+    env_path = root_dir / ".env"
+    results_dir = os.environ.get("RESULTS_DIR") or _read_env_value(env_path, "RESULTS_DIR", "results")
+    p = Path(results_dir)
+    if not p.is_absolute():
+        p = root_dir / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 def calculate_completion_time_and_success(json_file_path="results.json", output_csv_path="output.csv"):
     """
@@ -107,9 +137,14 @@ def calculate_completion_time_and_success(json_file_path="results.json", output_
     return completion_data
 
 if __name__ == "__main__":
+    results_dir = _resolve_results_dir()
+
     parser = argparse.ArgumentParser(description="Convert JSON requests data to CSV with completion times and success rate.")
-    parser.add_argument("json_file_path", nargs="?", default="results.json", help="Path to the input JSON file (default: result.json)")
-    parser.add_argument("output_csv_path", nargs="?", default="output.csv", help="Path to the output CSV file (default: output.csv)")
+    parser.add_argument("json_file_path", nargs="?", default=None, help="Path to the input JSON file (default: RESULTS_DIR/results.json)")
+    parser.add_argument("output_csv_path", nargs="?", default=None, help="Path to the output CSV file (default: RESULTS_DIR/output.csv)")
     args = parser.parse_args()
 
-    calculate_completion_time_and_success(args.json_file_path, args.output_csv_path)
+    json_file_path = args.json_file_path if args.json_file_path else str(results_dir / "results.json")
+    output_csv_path = args.output_csv_path if args.output_csv_path else str(results_dir / "output.csv")
+
+    calculate_completion_time_and_success(json_file_path, output_csv_path)

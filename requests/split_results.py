@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Load minutes from .env (root of workspace)
 def _load_env(path):
@@ -25,6 +26,12 @@ try:
     BUFFER_SECONDS = int(ENV.get('FILTER_BUFFER', '300'))
 except ValueError:
     BUFFER_SECONDS = 300
+
+RESULTS_DIR = ENV.get('RESULTS_DIR') or os.environ.get('RESULTS_DIR', 'results')
+RESULTS_PATH = Path(RESULTS_DIR)
+if not RESULTS_PATH.is_absolute():
+    RESULTS_PATH = Path(ROOT_DIR) / RESULTS_PATH
+RESULTS_PATH.mkdir(parents=True, exist_ok=True)
 
 def process_experiment_data(input_file):
     # Read the CSV file
@@ -77,17 +84,19 @@ def process_experiment_data(input_file):
     print(f"Second half: {len(second_half)} records")
     
     # Save to new CSV files
-    first_half.to_csv('first_half.csv', index=False)
-    second_half.to_csv('second_half.csv', index=False)
+    first_half_path = RESULTS_PATH / 'first_half.csv'
+    second_half_path = RESULTS_PATH / 'second_half.csv'
+    first_half.to_csv(first_half_path, index=False)
+    second_half.to_csv(second_half_path, index=False)
     
     print(f"\nFiles created:")
-    print(f"- first_half.csv ({len(first_half)} records)")
-    print(f"- second_half.csv ({len(second_half)} records)")
+    print(f"- {first_half_path} ({len(first_half)} records)")
+    print(f"- {second_half_path} ({len(second_half)} records)")
     
     return first_half, second_half
 
 # Process the data
-first_period, second_period = process_experiment_data('output.csv')
+first_period, second_period = process_experiment_data(RESULTS_PATH / 'output.csv')
 
 # Display some statistics
 print(f"\nFirst period statistics:")
