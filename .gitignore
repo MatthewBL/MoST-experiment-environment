@@ -173,3 +173,12 @@ examples/*.json
 logs/
 pod_logs*/
 
+# Dashboard
+MoST-dashboard-api/
+
+# Results
+results/
+results*
+
+# Logs
+*.out
