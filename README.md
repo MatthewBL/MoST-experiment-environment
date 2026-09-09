@@ -14,9 +14,12 @@ Set your preferences in the [.env](.env) file. Key settings:
 	- `in:outMin-outMax` (fixed input, output range)
 	- `inMin-inMax:outMin-outMax` (both ranges)
 	Examples: `16-64:128-256,32:64-128,64-64:256-256`.
+- Additive mode: Set `ADDITIVE=TRUE` to run a single experiment that mixes all interval pairs from `TOKENS_LIST`.
+- Additive proportions: Set `TOKENS_LIST_PROPORTION` as comma-separated weights aligned by index with `TOKENS_LIST` (for example `1,1,0.5,2`). Lower weights produce fewer prompts for that interval in the mixed workload.
 - REQ_MIN start: Set `REQ_MIN_START` to the initial requests/min value.
 - REQ_MIN increase: Set `REQ_MIN_INCREASE_MULTIPLIER` to control growth during stage 1.
-- Stop threshold: Set `STOP_THRESHOLD` for the stage 2 termination criterion.
+- Threshold type: Set `THRESHOLD_TYPE` to `relative` or `absolute` for stage 2 stop semantics.
+- Stop threshold: Set `STOP_THRESHOLD` for stage 2 termination (`M - m <= M * STOP_THRESHOLD` for `relative`, or `M - m <= STOP_THRESHOLD` for `absolute`).
 
 Notes:
 - The values `MIN/MAX_INPUT/OUTPUT_TOKENS` are set per iteration from `TOKENS_LIST`; the [.env](.env) file is not modified during runs.
@@ -61,7 +64,9 @@ REQ_MIN starts at `REQ_MIN_START` and is increased by `REQ_MIN_INCREASE_MULTIPLI
 If `ITERATION_HARD_LIMIT` is exceeded during this stage, the token-interval experiment ends immediately and is marked as failed in `results.csv`.
 
 ## Find MST
-We set _m_ to the highest stable value for REQ_MIN and _M_ to the found unsustainable value of REQ_MIN. A binary search is performed, where REQ_MIN is set to the in-between value of _M_ and _m_ and we run an iteration. We evaluate the result, and update _m_ or _M_ accordingly, based on whether the value is deemed sustainable or not. This stage ends once _M - m_ is less than or equal to `STOP_THRESHOLD`.
+We set _m_ to the highest stable value for REQ_MIN and _M_ to the found unsustainable value of REQ_MIN. A binary search is performed, where REQ_MIN is set to the in-between value of _M_ and _m_ and we run an iteration. We evaluate the result, and update _m_ or _M_ accordingly, based on whether the value is deemed sustainable or not. This stage ends once the configured threshold condition is met:
+- `THRESHOLD_TYPE=relative`: _M - m_ <= _M_ * `STOP_THRESHOLD`
+- `THRESHOLD_TYPE=absolute`: _M - m_ <= `STOP_THRESHOLD`
 
 If `ITERATION_HARD_LIMIT` is exceeded during this stage, the token-interval experiment ends and returns the largest TRUE value (`m`) as output. The final `results.csv` entry also records termination metadata and binary-search gap values.
 

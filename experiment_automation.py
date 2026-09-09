@@ -123,21 +123,56 @@ def load_use_cases_from_yaml(yaml_path):
         print(f"Error loading use cases from YAML: {e}")
         return []
 
+def _parse_float_list(value):
+    """Parse comma-separated floats into a list. Invalid entries are skipped."""
+    items = []
+    if value is None:
+        return items
+    for part in str(value).split(','):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            items.append(float(p))
+        except ValueError:
+            continue
+    return items
+
+
+def _parse_bool(value, default=False):
+    """Parse common boolean strings. Returns default when value is empty/unknown."""
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if s in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return default
+
 def load_env_config():
     """Load configuration from .env file and return a dict.
 
     Expected keys:
     - TOKENS_LIST: comma-separated pairs like "32:32,32:64"
+    - TOKENS_LIST_PROPORTION: comma-separated weights, one per TOKENS_LIST entry
+    - ADDITIVE: TRUE/FALSE, when TRUE run one mixed experiment across TOKENS_LIST
     - REQ_MIN_START: comma-separated integers (per-token-combo initial REQ_MIN)
     - REQ_MIN_INCREASE_MULTIPLIER: integer (multiplier for stage 1 success)
-        - STOP_THRESHOLD: float (relative stop threshold used as
-            M - m <= M * STOP_THRESHOLD in stage 2)
+    - THRESHOLD_TYPE: 'relative' or 'absolute' for stage 2 stop condition
+    - STOP_THRESHOLD: float stop threshold used in stage 2
+        - relative: M - m <= M * STOP_THRESHOLD
+        - absolute: M - m <= STOP_THRESHOLD
+    - COOLDOWN: integer seconds to wait between iterations
     """
     env_path = Path('.env')
     config = {
         'TOKENS_LIST': [],
+        'TOKENS_LIST_PROPORTION': [],
+        'ADDITIVE': False,
         'REQ_MIN_START': [1],
         'REQ_MIN_INCREASE_MULTIPLIER': 2.0,
+        'THRESHOLD_TYPE': 'relative',
         'STOP_THRESHOLD': 0.5,
         'EXPERIMENT_TYPE': 'MST',
         'DURATION': None,
@@ -176,6 +211,8 @@ def load_env_config():
                         config['REQ_MIN_INCREASE_MULTIPLIER'] = float(val)
                     except ValueError:
                         pass
+                elif key == 'THRESHOLD_TYPE':
+                    config['THRESHOLD_TYPE'] = val.strip().lower() or 'relative'
                 elif key == 'STOP_THRESHOLD':
                     try:
                         config['STOP_THRESHOLD'] = float(val)
@@ -359,6 +396,56 @@ def get_experiment_type():
     return _normalize_experiment_type(CONFIG.get('EXPERIMENT_TYPE', 'MST'))
 
 
+def is_additive_experiment():
+    """Return whether additive mode is enabled via env or config."""
+    env_val = os.environ.get('ADDITIVE')
+    if env_val is not None:
+        return _parse_bool(env_val, default=False)
+    return bool(CONFIG.get('ADDITIVE', False))
+
+
+def _resolve_tokens_list_proportion(tokens_list):
+    """Return one non-negative weight per token interval pair."""
+    env_val = os.environ.get('TOKENS_LIST_PROPORTION')
+    if env_val is not None:
+        weights = _parse_float_list(env_val)
+    else:
+        weights = list(CONFIG.get('TOKENS_LIST_PROPORTION', []))
+
+    if not tokens_list:
+        return []
+
+    if not weights:
+        return [1.0 for _ in tokens_list]
+
+    cleaned = []
+    for w in weights:
+        try:
+            value = float(w)
+        except (TypeError, ValueError):
+            value = 0.0
+        cleaned.append(max(0.0, value))
+
+    if len(cleaned) < len(tokens_list):
+        print(
+            "Warning: TOKENS_LIST_PROPORTION has fewer values than TOKENS_LIST. "
+            "Missing weights default to 1.0."
+        )
+        cleaned.extend([1.0] * (len(tokens_list) - len(cleaned)))
+    elif len(cleaned) > len(tokens_list):
+        print(
+            "Warning: TOKENS_LIST_PROPORTION has more values than TOKENS_LIST. "
+            "Extra values are ignored."
+        )
+        cleaned = cleaned[:len(tokens_list)]
+
+    if all(w == 0.0 for w in cleaned):
+        print("Warning: all TOKENS_LIST_PROPORTION values are zero. Falling back to uniform weights.")
+        return [1.0 for _ in tokens_list]
+
+    return cleaned
+
+
 def _parse_duration_seconds(value):
     """Parse duration strings like '1800s', '30m', '2h' into seconds."""
     if value is None:
@@ -540,7 +627,13 @@ def _get_requests_filename_base():
     os.environ['REQUESTS_FILENAME_BASE'] = normalized
     return normalized
 
-def set_process_env_for_run(req_min_value, input_interval=None, output_interval=None):
+def set_process_env_for_run(
+    req_min_value,
+    input_interval=None,
+    output_interval=None,
+    apply_output_bounds=True,
+    requests_filename=None,
+):
     """Set environment variables in-process for a run without modifying .env.
 
     input_interval/output_interval can be:
@@ -556,13 +649,16 @@ def set_process_env_for_run(req_min_value, input_interval=None, output_interval=
         else:
             os.environ['MIN_INPUT_TOKENS'] = str(input_interval)
             os.environ['MAX_INPUT_TOKENS'] = str(input_interval)
-    if output_interval is not None:
+    if apply_output_bounds and output_interval is not None:
         if isinstance(output_interval, (list, tuple)) and len(output_interval) >= 2:
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval[0])
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval[1])
         else:
             os.environ['MIN_OUTPUT_TOKENS'] = str(output_interval)
             os.environ['MAX_OUTPUT_TOKENS'] = str(output_interval)
+    elif not apply_output_bounds:
+        os.environ.pop('MIN_OUTPUT_TOKENS', None)
+        os.environ.pop('MAX_OUTPUT_TOKENS', None)
 
     # Append min-max input interval to REQUESTS_FILENAME so downstream tools read the correct file
     if input_interval is not None:
@@ -687,18 +783,22 @@ def start_stage_1():
 def end_experiment(stage, M, m, evaluation):
     """Check termination condition for stage 2 using a relative threshold based on M.
 
-    Stops when the gap (M - m) is less than or equal to M * STOP_THRESHOLD.
-    Falls back to absolute STOP_THRESHOLD if M or m are not numbers.
+    - THRESHOLD_TYPE=relative: stop when M - m <= M * STOP_THRESHOLD
+    - THRESHOLD_TYPE=absolute: stop when M - m <= STOP_THRESHOLD
     """
     stop_threshold = CONFIG.get('STOP_THRESHOLD', 0.5)
+    threshold_type = get_threshold_type()
     if stage == 2 and (M is not None) and (m is not None):
         try:
-            relative_threshold = float(M) * float(stop_threshold)
+            if threshold_type == 'absolute':
+                threshold_value = float(stop_threshold)
+            else:
+                threshold_value = float(M) * float(stop_threshold)
         except Exception:
             # Fallback: treat threshold as absolute if casting fails
-            relative_threshold = float(stop_threshold)
+            threshold_value = float(stop_threshold)
 
-        if (M - m) <= relative_threshold:
+        if (M - m) <= threshold_value:
             if evaluation:
                 return True, "REQ_MIN", None  # Return REQ_MIN as result
             else:
@@ -785,7 +885,7 @@ def update_stage_2(evaluation, current_req_min, M, m, retry_count_stage2):
     new_req_min = (M + m) / 2
     return new_req_min, M, m, retry_count_stage2
 
-def run_experiment_for_tokens(tokens, initial_req_min=None):
+def run_experiment_for_tokens(tokens, initial_req_min=None, additive=False, additive_tokens=None, additive_weights=None):
     """Run the complete experiment for a specific token combination.
 
     initial_req_min: optional initial value for REQ_MIN specific to this
@@ -961,7 +1061,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={interval_strs[0]}, OUTPUT_TOKENS={interval_strs[1]}, REQ_MIN={req_min} ---")
         
         # Step 2: Update in-process environment for this iteration (no .env writes)
-        set_process_env_for_run(req_min)
+        set_process_env_for_run(
+            req_min,
+            apply_output_bounds=(not additive),
+            requests_filename=(req_path.name if req_path is not None else None),
+        )
         
         # Steps 3-7: Run evaluation pipeline with stored variables, passing current stage and parent_dir
         try:

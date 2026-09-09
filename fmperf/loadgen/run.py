@@ -19,6 +19,7 @@ from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILE
 import threading
 import itertools
 import math
+import random
 
 
 class ModelDiscoveryError(RuntimeError):
@@ -187,8 +188,18 @@ def run(result_filename=None):
         if not override_bounds:
             return payload, None
         min_tokens, max_tokens = override_bounds
-        if max_tokens == min_tokens:
-            desired_tokens = min_tokens
+        if not exact_output_tokens:
+            if target == "vllm":
+                payload["min_tokens"] = int(min_tokens)
+                payload["max_tokens"] = int(max_tokens)
+            elif target == "tgis":
+                params = payload.setdefault("params", {})
+                stopping = params.setdefault("stopping", {})
+                stopping["minNewTokens"] = int(min_tokens)
+                stopping["maxNewTokens"] = int(max_tokens)
+            return payload, (int(min_tokens), int(max_tokens))
+        if int(max_tokens) == int(min_tokens):
+            desired_tokens = int(min_tokens)
         else:
             desired_tokens = int(rng.randint(low=min_tokens, high=max_tokens + 1))
         if target == "vllm":
@@ -200,8 +211,6 @@ def run(result_filename=None):
             stopping["minNewTokens"] = desired_tokens
             stopping["maxNewTokens"] = desired_tokens
         return payload, desired_tokens
-
-    output_token_override = _get_output_token_override_bounds()
 
     infile = os.path.join(REQUESTS_DIR, REQUESTS_FILENAME)
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -442,9 +451,27 @@ def run(result_filename=None):
             interval_base_ns = float('inf')
 
         def process_request(req_idx):
-            # Pick a sample request (thread-safe selection)
-            with rs_lock:
-                sample_idx = rs.randint(low=0, high=len(sample_requests))
+            # For additive mode, pick from a precomputed global schedule and wrap around as needed.
+            per_request_override = output_token_override
+            exact_output_tokens = True
+            if use_additive_scheduler:
+                with additive_lock:
+                    schedule_pos = next(additive_schedule_cursor)
+                    schedule_idx = schedule_pos % len(additive_schedule)
+                    interval_idx = additive_schedule[schedule_idx]
+                    interval_candidates = additive_interval_case_indices[interval_idx]
+                    if interval_candidates:
+                        cursor = additive_case_cursors[interval_idx]
+                        sample_idx = interval_candidates[cursor % len(interval_candidates)]
+                        additive_case_cursors[interval_idx] = cursor + 1
+                    else:
+                        sample_idx = all_sample_indices[schedule_pos % len(all_sample_indices)]
+                    per_request_override = additive_output_bounds[interval_idx]
+                    exact_output_tokens = False
+            else:
+                # Pick a sample request (thread-safe selection)
+                with rs_lock:
+                    sample_idx = rs.randint(low=0, high=len(sample_requests))
             template_request = sample_requests[sample_idx]["request"]
             request_payload, _ = _build_request_payload(
                 template_request, target, rs, output_token_override, active_model
