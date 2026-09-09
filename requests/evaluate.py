@@ -10,6 +10,30 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import sys
 
+
+def _load_env(path: Path) -> dict:
+    env = {}
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+ENV = _load_env(ROOT_DIR / '.env')
+RESULTS_DIR = ENV.get('RESULTS_DIR') or os.environ.get('RESULTS_DIR', 'results')
+RESULTS_PATH = Path(RESULTS_DIR)
+if not RESULTS_PATH.is_absolute():
+    RESULTS_PATH = ROOT_DIR / RESULTS_PATH
+
 SUCCESS_RATE_THRESHOLD = float(os.environ.get('SUCCESS_RATE_THRESHOLD', '95.0'))
 
 # Function definitions
@@ -86,7 +110,7 @@ if __name__ == "__main__":
         ]
         
         for fname in filenames:
-            csv_path = Path(fname)
+            csv_path = RESULTS_PATH / fname
             if not csv_path.exists():
                 print(f"File {fname} not found in current directory")
                 continue
@@ -95,9 +119,9 @@ if __name__ == "__main__":
             except ValueError as e:
                 print(f"Error loading {fname}: {e}")
                 continue
-            datasets[csv_path.name] = df
-            min_ts_dict[csv_path.name] = df[timestamp_column].iloc[0]
-            max_ts_dict[csv_path.name] = df[timestamp_column].iloc[-1]
+            datasets[fname] = df
+            min_ts_dict[fname] = df[timestamp_column].iloc[0]
+            max_ts_dict[fname] = df[timestamp_column].iloc[-1]
 
         return datasets, min_ts_dict, max_ts_dict
 
@@ -233,13 +257,13 @@ if __name__ == "__main__":
         return records
 
     # ───────────────────────────── Main execution logic ───────────────────────────────────
-    print("Loading datasets from current directory...")
+    print(f"Loading datasets from {RESULTS_PATH}...")
     
     # Collect datasets from current directory
     datasets, min_ts, max_ts = collect_datasets()
 
     if len(datasets) < 2:
-        print("Error: Need at least two datasets (first_half.csv and second_half.csv) in current directory")
+        print("Error: Need at least two datasets (first_half.csv and second_half.csv) in RESULTS_DIR")
         sys.exit(1)  # Exit with error code
 
     # Check success_rate in each dataset
@@ -310,8 +334,7 @@ if __name__ == "__main__":
             print(f"Overall {STAT_DIFF_COL}: {final_result} (no comparable pairs)")
 
     # Add the statistical difference flag to any base CSV files
-    current_dir = Path(".")
-    for csv_file in current_dir.glob("*.csv"):
+    for csv_file in RESULTS_PATH.glob("*.csv"):
         if csv_file.name not in ["first_half.csv", "second_half.csv"]:
             try:
                 base_df = pd.read_csv(csv_file)

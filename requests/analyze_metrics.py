@@ -32,6 +32,31 @@ TimestampKeys = ("timestamp", "created_at", "time", "ts")
 TokenListKeys = ("tokens", "chunks", "deltas")
 
 
+def _load_env(path: str) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+def _default_results_dir() -> str:
+    root_dir = os.path.dirname(os.path.dirname(__file__))
+    env = _load_env(os.path.join(root_dir, ".env"))
+    results_dir = os.environ.get("RESULTS_DIR") or env.get("RESULTS_DIR") or "results"
+    if not os.path.isabs(results_dir):
+        results_dir = os.path.join(root_dir, results_dir)
+    return results_dir
+
+
 def parse_timestamp(ts_val) -> Optional[datetime]:
     """Parse a timestamp value into a timezone-aware datetime (UTC).
     Robustly supports ISO 8601 strings and epoch seconds/milliseconds.
@@ -321,12 +346,7 @@ def compute_metrics(events: List[Dict[str, Optional[datetime]]]):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_metrics.py <folder_path>")
-        print("Example: python analyze_metrics.py \"C:\\Users\\Hola Isa\\Desktop\\New folder (4)\\sent_data\\2025-12-04_10-56-09\"")
-        sys.exit(1)
-
-    folder = sys.argv[1]
+    folder = sys.argv[1] if len(sys.argv) >= 2 else _default_results_dir()
     if not os.path.isdir(folder):
         print(f"Error: Not a directory: {folder}")
         sys.exit(2)
@@ -347,3 +367,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

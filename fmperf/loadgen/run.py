@@ -13,8 +13,9 @@ import grpc
 from google.protobuf import json_format
 from fmperf.utils import parse_results
 from datetime import datetime
+from pathlib import Path
 from .collect_energy import collect_metrics, summarize_energy
-from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME
+from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, RESULTS_DIR
 import threading
 import itertools
 import math
@@ -203,21 +204,64 @@ def run(result_filename=None):
     output_token_override = _get_output_token_override_bounds()
 
     infile = os.path.join(REQUESTS_DIR, REQUESTS_FILENAME)
-    outfile = os.path.join(REQUESTS_DIR, result_filename)
-    target = os.environ["TARGET"]
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    outfile = os.path.join(RESULTS_DIR, result_filename)
+    target = os.environ.get("TARGET", "vllm")
     api_url = os.environ["URL"]
     model_discovery_timeout = float(os.environ.get("MODEL_DISCOVERY_TIMEOUT", "10"))
+    service_type = os.environ.get('SERVICE_TYPE', 'LLM')
 
-    # Discover the model directly from the endpoint before starting the experiment.
-    # If discovery fails, abort early as requested.
-    try:
-        active_model = _discover_model_from_url(api_url, model_discovery_timeout)
-    except Exception as exc:
-        raise ModelDiscoveryError(
-            f"Unable to discover model from URL '{api_url}'. Aborting experiment early."
-        ) from exc
+    active_model = None
+    if service_type != 'SaaS':
+        # Discover the model directly from the endpoint before starting the experiment.
+        # If discovery fails, abort early as requested.
+        try:
+            active_model = _discover_model_from_url(api_url, model_discovery_timeout)
+        except Exception as exc:
+            raise ModelDiscoveryError(
+                f"Unable to discover model from URL '{api_url}'. Aborting experiment early."
+            ) from exc
+        print(f">> Discovered model from endpoint: {active_model}")
+    else:
+        active_model = 'SaaS'
+        print(">> Running in SaaS Mode")
 
-    print(f">> Discovered model from endpoint: {active_model}")
+    active_use_case = None
+    yaml_path = os.environ.get('USE_CASES_YAML')
+    if service_type == 'SaaS' and yaml_path:
+        import yaml
+        try:
+            # normalize/preprocess yaml colons
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            lines = []
+            for l in content.splitlines():
+                if ':' in l:
+                    parts = l.split(':', 1)
+                    if not parts[1].startswith(' '):
+                        l = f"{parts[0]}: {parts[1]}"
+                lines.append(l)
+            data = yaml.safe_load('\n'.join(lines))
+            use_cases = []
+            if isinstance(data, dict):
+                if 'useCase' in data:
+                    use_cases = [data['useCase']]
+                elif 'useCases' in data:
+                    val = data['useCases']
+                    use_cases = val if isinstance(val, list) else [val]
+                else:
+                    use_cases = [data]
+            elif isinstance(data, list):
+                use_cases = data
+            
+            active_id = os.environ.get('ACTIVE_USE_CASE_ID')
+            for uc in use_cases:
+                if uc.get('id') == active_id:
+                    active_use_case = uc
+                    break
+            print(f">> Loaded SaaS active use case: {active_id}")
+        except Exception as e:
+            print(f"Error loading use case in loadgen: {e}")
     req_min = float(os.environ["REQ_MIN"])  # Changed from int() to float() to allow non-integer values
     duration = Duration(os.environ["DURATION"])
     backoff = Duration(os.environ["BACKOFF"])
@@ -258,6 +302,124 @@ def run(result_filename=None):
             jitter_range = 0.0
 
         t_start = time.time_ns()
+
+        if service_type == 'SaaS':
+            # Run SaaS pacing worker logic
+            output = []
+            request_counter = itertools.count()
+            
+            # Pacing based on worker_req_per_sec (use-case iterations per second)
+            next_iteration_time = t_start
+            interval_ns = (1.0 / worker_req_per_sec) * 1e9 if worker_req_per_sec > 0 else float('inf')
+            
+            endpoints = active_use_case.get('endpoints', {}) if active_use_case else {}
+            endpoint_list = list(endpoints.items())
+            
+            while (time.time_ns() - t_start) < duration.to_seconds() * 1e9:
+                current_time = time.time_ns()
+                if current_time < next_iteration_time:
+                    time.sleep((next_iteration_time - current_time) / 1e9)
+                
+                req_idx = next(request_counter)
+                response_idx = 0
+                
+                for ep_name, ep_config in endpoint_list:
+                    t0 = time.time_ns()
+                    method = ep_config.get('http', 'GET').upper()
+                    path = ep_config.get('url', '')
+                    
+                    # Resolve path params
+                    pathparams = ep_config.get('pathparams', {}) or {}
+                    for param_name, param_type in pathparams.items():
+                        val = "dummy_str"
+                        if str(param_type).lower() in ('integer', 'int'):
+                            val = "1"
+                        path = path.replace(f"{{{param_name}}}", val).replace(f":{param_name}", val)
+                    
+                    # Resolve query params
+                    queryparams = ep_config.get('queryparams', {}) or {}
+                    resolved_query = {}
+                    for param_name, param_type in queryparams.items():
+                        val = "dummy_str"
+                        if str(param_type).lower() in ('integer', 'int'):
+                            val = 1
+                        resolved_query[param_name] = val
+                    
+                    # Resolve body
+                    body_file = ep_config.get('body')
+                    json_body = None
+                    if body_file:
+                        body_path = Path(body_file)
+                        if not body_path.is_absolute():
+                            yaml_dir = Path(yaml_path).parent if yaml_path else Path('.')
+                            body_path = (yaml_dir / body_path).resolve()
+                        if body_path.is_file():
+                            try:
+                                with open(body_path, 'r', encoding='utf-8') as bf:
+                                    json_body = json.load(bf)
+                            except Exception:
+                                pass
+                        if json_body is None:
+                            json_body = {}
+                    
+                    # Construct URL
+                    endpoint_base_url = os.environ["URL"]
+                    if not endpoint_base_url.startswith("http://") and not endpoint_base_url.startswith("https://"):
+                        endpoint_base_url = f"http://{endpoint_base_url}"
+                    
+                    full_url = f"{endpoint_base_url.rstrip('/')}/{path.lstrip('/')}"
+                    
+                    ok = False
+                    error_msg = "None"
+                    resp_json = None
+                    try:
+                        headers = {"User-Agent": "most-load-test"}
+                        resp = requests.request(
+                            method=method,
+                            url=full_url,
+                            params=resolved_query,
+                            json=json_body,
+                            headers=headers,
+                            timeout=request_timeout
+                        )
+                        ok = (200 <= resp.status_code < 300)
+                        if not ok:
+                            error_msg = f"HTTP {resp.status_code}"
+                        try:
+                            resp_json = resp.json()
+                        except Exception:
+                            resp_json = resp.text[:200]
+                    except Exception as e:
+                        ok = False
+                        error_msg = str(e)
+                    
+                    t = time.time_ns()
+                    record = {
+                        "response": resp_json,
+                        "ok": ok,
+                        "error": error_msg,
+                        "timestamp": t,
+                        "exp_req_min": req_min,
+                        "exp_duration": duration.to_seconds(),
+                        "duration_ms": (t - t0) / 1000.0 / 1000.0,
+                        "exclude": (t - t_start) / 1e9 > (duration.to_seconds() + grace_period.to_seconds()),
+                        "worker_idx": wid,
+                        "request_idx": req_idx,
+                        "sample_idx": 0,
+                        "response_idx": response_idx,
+                        "n_tokens": 0,
+                        "exp_num_users": exp_num_users,
+                        "endpoint": ep_name,
+                        "url": full_url
+                    }
+                    output.append(record)
+                    response_idx += 1
+                
+                next_iteration_time += int(interval_ns)
+            
+            with open("results_wid%d" % (wid), "w") as f:
+                json.dump(output, f)
+            return True
 
         output = []
         output_lock = threading.Lock()
