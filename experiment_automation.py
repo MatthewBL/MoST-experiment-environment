@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -9,10 +10,16 @@ import urllib.parse
 import urllib.request
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from fmperf.utils.constants import REQUESTS_DIR, REQUESTS_FILENAME, RESULTS_FILENAME, RESULTS_DIR
 
 REQUESTS_PROMPTS_FILE = Path("oasst_roots_en_max1000_tokens.jsonl")
+
+# Result folders (per token-combo parent dirs) created by the current execution.
+# They are moved into results/<EXPERIMENT_TYPE>_<timestamp> when the automation
+# finishes (see _archive_execution_results).
+CREATED_RESULT_DIRS: list[str] = []
 
 #
 # Configuration loader: read values from .env without modifying the file.
@@ -856,6 +863,10 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
         output_interval = tokens[1]
         interval_strs = (str(tokens[0]), str(tokens[1]))
     
+    # Track this execution's result folder so it can be archived at the end.
+    if parent_dir and parent_dir not in CREATED_RESULT_DIRS:
+        CREATED_RESULT_DIRS.append(parent_dir)
+    
     # Step 1: Initialize stage 1
     stage = start_stage_1()
     req_min = initial_req_min if initial_req_min is not None else 1  # Per-combo initial value
@@ -1174,6 +1185,39 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     print(f"\nReached maximum iterations ({max_iterations}). Stopping.")
     return None
 
+def _archive_execution_results():
+    """Move this execution's per-token result folders into a single archive folder.
+
+    The archive is created inside the results directory and named
+    [EXPERIMENT_TYPE]_[YYYY-MM-DD_HH-MM-SS], where the timestamp reflects when
+    the automation finished (i.e., when this function runs).
+    """
+    if not CREATED_RESULT_DIRS:
+        return
+
+    root_dir = Path(__file__).resolve().parent
+    results_dir = Path(
+        os.environ.get('RESULTS_DIR') or _read_env_value(root_dir / '.env', 'RESULTS_DIR', 'results')
+    )
+    if not results_dir.is_absolute():
+        results_dir = root_dir / results_dir
+
+    experiment_type = re.sub(r'[^0-9A-Za-z_-]', '_', get_experiment_type())
+    finished_at = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    archive_dir = results_dir / f"{experiment_type}_{finished_at}"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    moved = 0
+    for name in CREATED_RESULT_DIRS:
+        src = results_dir / name
+        if src.is_dir():
+            shutil.move(str(src), str(archive_dir / name))
+            moved += 1
+        else:
+            print(f"Warning: expected result folder not found: {src}")
+    print(f"Archived {moved} result folder(s) into {archive_dir}")
+
+
 def main():
     service_type = CONFIG.get('SERVICE_TYPE', 'LLM')
     
@@ -1218,6 +1262,7 @@ def main():
         print(f"{'='*60}")
         for uc_id, result in results.items():
             print(f"Use Case {uc_id}: {result}")
+        _archive_execution_results()
         return results
     else:
         input_output_tokens = CONFIG.get('TOKENS_LIST', [])
@@ -1251,6 +1296,9 @@ def main():
         print(f"{'='*60}")
         for token_combo, result in results.items():
             print(f"Tokens {token_combo}: {result}")
+        
+        # Move this execution's results into their final archive folder.
+        _archive_execution_results()
         
         return results
 

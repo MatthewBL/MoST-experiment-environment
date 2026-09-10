@@ -40,6 +40,8 @@ sbatch experiment_automation.slurm
 
 # Results
 
+When `experiment_automation.py` finishes an execution, all results of that execution are moved into an archive folder inside the results directory named `[EXPERIMENT_TYPE]_[YYYY-MM-DD_HH-MM-SS]`. `EXPERIMENT_TYPE` is taken from the `EXPERIMENT_TYPE` environment variable (or the `.env` file), and the timestamp records when the automation finished. Each archive folder contains one subfolder per token interval (or per SaaS use case), as described below.
+
 The results can be found in the folder /requests, under the name XXX_YYY, where XXX is the number of input tokens of the iteration and YYY is the number of output tokens of the iteration. Within these folders, you will find more folders with the timestamp of each iteration. Finally, here you will find "first_half.csv", "second_half.csv", "output.csv", "results.csv" and "results.json". "first_half.csv" and "second_half.csv" is a summary of the response time of tokens generated in the first and second halves of the experiment, and "output.csv" is the file from which these two are obtained. "results.json" is the standard output of fmperf, where you can find information per token generated. Finally, "results.csv" is a summary of the results obtained from the iteration.
 
 Relevant `results.csv` fields:
