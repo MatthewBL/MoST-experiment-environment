@@ -1,4 +1,4 @@
-fmperf repository: https://github.com/fmperf-project/fmperf
+﻿fmperf repository: https://github.com/fmperf-project/fmperf
 
 # Setup
 
@@ -50,6 +50,7 @@ Relevant `results.csv` fields:
 - `TERMINATION_REASON`: optional reason for early termination. Populated when hard-limit stop conditions are hit.
 - `BINARY_SEARCH_DISTANCE`: optional absolute distance between smallest FALSE and largest TRUE values in stage 2 (`M - m`) when hard limit is exceeded.
 - `BINARY_SEARCH_RELATIVE_DISTANCE`: optional relative stage-2 gap, computed as `(M - m) / (M_0 - m_0)` when hard limit is exceeded.
+- `GPU_COUNT`: number of GPUs used by the Slurm job serving the model during the iteration. Populated best-effort by `requests/store_results.py` via the shared `fmperf/utils/GpuCount.py` helper; left empty when unavailable.
 
 # How it works
 

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import csv
 import json
@@ -11,6 +11,19 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Best-effort GPU_COUNT resolution. fmperf may not be importable when this
+# script runs as a standalone subprocess; degrade gracefully in that case.
+try:
+    _FMPERF_ROOT = Path(__file__).resolve().parent.parent
+    if str(_FMPERF_ROOT) not in sys.path:
+        sys.path.insert(0, str(_FMPERF_ROOT))
+    from fmperf.utils.GpuCount import GPU_COUNT_FIELD, find_model_job_gpu_count
+except Exception:
+    GPU_COUNT_FIELD = "GPU_COUNT"
+
+    def find_model_job_gpu_count(*_args, **_kwargs):
+        raise RuntimeError("fmperf.utils.GpuCount is unavailable")
 
 # Best-effort helpers to enrich results.csv with requested fields
 def _read_env_value(env_path: Path, key: str, default: str = "") -> str:
@@ -65,6 +78,40 @@ def _normalize_endpoint_base_url(value: str | None) -> str:
 
 def _is_endpoint_like(value: str | None) -> bool:
     return bool(_normalize_endpoint_base_url(value))
+
+def _parse_node_port(url: str) -> tuple[str, str] | None:
+    """Return (node, port) from an endpoint like gpu05:9000 or http://gpu05:9000/v1."""
+    endpoint = _normalize_endpoint_value(url)
+    if not endpoint:
+        return None
+
+    parsed = urllib.parse.urlparse(endpoint)
+    hostport = parsed.netloc if (parsed.scheme and parsed.netloc) else endpoint
+    hostport = hostport.split("/", 1)[0]
+    if ":" not in hostport:
+        return None
+
+    host, port = hostport.rsplit(":", 1)
+    host = host.strip()
+    port = port.strip()
+    if not host or not port.isdigit():
+        return None
+    return host, port
+
+
+def _resolve_gpu_count(model_used: str, url: str) -> str:
+    """Best-effort GPU_COUNT (str) for the model-serving Slurm job; "" when unavailable."""
+    if not model_used or not url:
+        return ""
+    node_port = _parse_node_port(url)
+    if node_port is None:
+        return ""
+    node, port = node_port
+    try:
+        result = find_model_job_gpu_count(model_used, node, port)
+        return str(result["gpuCount"])
+    except Exception:
+        return ""
 
 def _find_slurm_log(job_id: str | None) -> tuple[str | None, str | None]:
     """Return (job_id, slurm_log_path) if found.
@@ -1019,6 +1066,9 @@ def main():
             timeout_seconds=float(os.environ.get('MODEL_DISCOVERY_TIMEOUT', '10')),
         )
 
+        # GPU_COUNT: number of GPUs used by the model-serving Slurm job (best-effort)
+        gpu_count = _resolve_gpu_count(model_used, url)
+
         # Create new CSV file
         new_csv_path = os.path.join(full_dir_path, "results.csv")
         with open(new_csv_path, 'w', newline='') as file:
@@ -1029,7 +1079,7 @@ def main():
                 "MIN_INPUT_TOKENS", "MAX_INPUT_TOKENS",
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
-                "DURATION", "URL", "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
+                "DURATION", "URL", GPU_COUNT_FIELD, "TOTAL_REQUESTS", "SUCCESS_RATE", "MEDIAN_PROMPT_TOKENS",
                 "MEDIAN_RESPONSE_TOKENS", "JOB_ID", "STAGE",
                 "RESPONSES_WITHIN_EXPECTED_INTERVAL", "RESPONSES_OUTSIDE_EXPECTED_INTERVAL",
                 "AVG_TOKENS_PER_REQUEST", "AVG_TOKENS_PER_RESPONSE",
@@ -1050,6 +1100,7 @@ def main():
                 evaluation,
                 duration,
                 url,
+                gpu_count or '',
                 total_requests or '',
                 success_rate or '',
                 prompt_token_count or '',
