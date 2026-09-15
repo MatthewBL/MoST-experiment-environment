@@ -1189,7 +1189,7 @@ def _archive_execution_results():
     """Move this execution's per-token result folders into a single archive folder.
 
     The archive is created inside the results directory and named
-    [EXPERIMENT_TYPE]_[YYYY-MM-DD_HH-MM-SS], where the timestamp reflects when
+    Experiment_[EXPERIMENT_TYPE]_[YYYY-MM-DD_HH-MM-SS], where the timestamp reflects when
     the automation finished (i.e., when this function runs).
     """
     if not CREATED_RESULT_DIRS:
@@ -1204,7 +1204,7 @@ def _archive_execution_results():
 
     experiment_type = re.sub(r'[^0-9A-Za-z_-]', '_', get_experiment_type())
     finished_at = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    archive_dir = results_dir / f"{experiment_type}_{finished_at}"
+    archive_dir = results_dir / f"Experiment_{experiment_type}_{finished_at}"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     moved = 0
