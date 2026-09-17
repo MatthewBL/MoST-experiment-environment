@@ -47,7 +47,10 @@ and differ only in how an iteration's verdict is computed.
 
 - Apply any verdict override **before** the persistence block: `_confirmed_bounds()` is read after
   the stage update precisely so that an iteration whose verdict changed (MIT included) is stored
-  under the correct `LARGEST_TRUE` / `SMALLEST_FALSE`.
+  under the correct `LARGEST_TRUE` / `SMALLEST_FALSE`. Both columns are **confirmed** bounds, so a
+  row with `EVALUATION=FALSE` whose FALSE was not confirmed yet (first FALSE of the double-FALSE
+  retry, or a stage-2 first failure) legitimately keeps an empty `SMALLEST_FALSE`. Do not relax that
+  rule to fill the column: it is what keeps `SMALLEST_FALSE - LARGEST_TRUE` a valid bracket.
 - Keep thresholds overridable with the existing precedence (`os.environ` → `.env` → literal default)
   and keep defaults consistent with `.env.example`. When adding a threshold, document it in
   `.env.example` **and** `README.md`.

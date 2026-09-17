@@ -578,6 +578,36 @@ def _compute_request_token_stats(
 
     return out
 
+_TOKEN_RANGE_RE = re.compile(r"^\d+(?:-\d+)?$")
+
+
+def _looks_like_token_range(value: str | None) -> bool:
+    """True when the value looks like a token interval, e.g. '128' or '128-256'."""
+    return bool(_TOKEN_RANGE_RE.match(str(value).strip()))
+
+
+def _compact_layout_signature(args: list[str], offset: int = 0, saas_mode: bool = False) -> bool:
+    """True when args[offset:] matches the compact CLI layout built by experiment_automation.py.
+
+    Compact layout (offset 0): model, stage, parent_dir, in_range, out_range, req_min, evaluation.
+    The signature is positive - stage in {1, 2}, non-empty parent_dir, token intervals in the
+    in/out positions (relaxed in SaaS mode, where those slots carry the use-case id) and a
+    TRUE/FALSE evaluation - so it cannot be satisfied by the legacy layout, whose offset-1 slot
+    holds the GPU count, offset-3 the node name and offset-6 a token range.
+    """
+    if len(args) < offset + 7:
+        return False
+    intervals_ok = saas_mode or (
+        _looks_like_token_range(args[offset + 3]) and _looks_like_token_range(args[offset + 4])
+    )
+    return (
+        str(args[offset + 1]).strip() in ("1", "2")
+        and bool(str(args[offset + 2]).strip())
+        and intervals_ok
+        and str(args[offset + 6]).strip().upper() in ("TRUE", "FALSE")
+    )
+
+
 def _parse_range(value: str | None) -> tuple[str | None, str | None]:
     """Parse a token range string like '32-64' or '32' into (min,max) strings.
     Returns (None, None) if input is falsy.
@@ -847,7 +877,56 @@ def main():
         # - Compact (current): model, stage, parent_dir, in_range, out_range, req_min, evaluation, [median]
         # - Legacy:            model, gpus, cpus, node, stage, parent_dir, in_range, out_range, req_min, evaluation, [median]
         args = sys.argv[1:]
-        is_compact_cli = len(args) >= 7 and ('_' in str(args[2]) or '/' in str(args[2]) or '\\' in str(args[2]))
+        # Layout detection. The compact layout is the one experiment_automation.py builds:
+        #   model, stage, parent_dir, in_range, out_range, req_min, evaluation, ...
+        # It used to be detected with '"_" in args[2]', which silently fell back to the legacy
+        # layout whenever a leading argument was added; every column was then read one position
+        # off (parent_dir -> out_range, LARGEST_TRUE -> finished flag, SMALLEST_FALSE never set).
+        # Use a positive signature and always log the layout that was selected.
+        saas_mode = os.environ.get("SERVICE_TYPE", "").strip() == "SaaS"
+        is_compact_cli = _compact_layout_signature(args, 0, saas_mode)
+        # Offset 3 also matches the legacy layout, so only offsets 1-2 are unambiguous evidence
+        # of the compact layout being pushed down by extra leading arguments.
+        misplaced_compact_offset = None
+        if not _compact_layout_signature(args, 3, saas_mode):
+            misplaced_compact_offset = next(
+                (
+                    offset
+                    for offset in (1, 2)
+                    if _compact_layout_signature(args, offset, saas_mode)
+                ),
+                None,
+            )
+        if is_compact_cli:
+            print(
+                "CLI format: compact (model, stage, parent_dir, in_range, out_range, req_min, "
+                f"evaluation, ...) [{len(args)} args]"
+            )
+        elif misplaced_compact_offset is not None:
+            print(
+                f"Warning: compact CLI layout detected at argument index {misplaced_compact_offset} "
+                f"instead of 0; every results.csv column is shifted by {misplaced_compact_offset} "
+                "position(s). Append new arguments at the end of store_args in "
+                "experiment_automation.py, never in the middle."
+            )
+            if len(args) >= 10:
+                print(
+                    "CLI format: legacy fallback (compact layout found at offset "
+                    f"{misplaced_compact_offset}) [{len(args)} args]"
+                )
+            else:
+                print(
+                    "CLI format: environment fallback (compact layout found at offset "
+                    f"{misplaced_compact_offset}) [{len(args)} args]"
+                )
+        elif len(args) >= 10:
+            print(
+                f"CLI format: legacy (model, gpus, cpus, node, stage, parent_dir, ...) [{len(args)} args]"
+            )
+        else:
+            print(
+                f"CLI format: environment/no-args (values read from os.environ) [{len(args)} args]"
+            )
         experiment_type = os.environ.get('EXPERIMENT_TYPE', '')
         parent_dir = None
         model = os.environ.get('MODEL', '')
@@ -954,6 +1033,18 @@ def main():
             finished_flag = 'TRUE'
         elif str(finished_flag).strip().lower() in {'false', '0', 'no'}:
             finished_flag = 'FALSE'
+
+        # EXPERIMENT_TYPE travels through the environment, never argv (store_args has no slot
+        # for it). experiment_automation.py exports the resolved value before spawning this
+        # script; when it is invoked outside the automation, fall back to the .env files, as
+        # done for DURATION/URL below, so the column is never written empty.
+        experiment_type = str(experiment_type or "").strip().upper()
+        if not experiment_type:
+            for env_candidate in (Path(__file__).resolve().parent.parent / ".env", Path("..") / ".env"):
+                experiment_type = _read_env_value(env_candidate, "EXPERIMENT_TYPE", "").strip().upper()
+                if experiment_type:
+                    break
+        print(f"Experiment type: {experiment_type or '<unknown>'}")
 
         # Create the full directory path
         if parent_dir:

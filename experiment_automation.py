@@ -460,6 +460,28 @@ def _format_bound_number(value):
     return f"{numeric:.6f}".rstrip('0').rstrip('.')
 
 
+def _store_args_contract_ok(store_positional: list[str]) -> bool:
+    """Check the positional tail of the store_results.py argv against its compact layout.
+
+    store_results.py infers the layout from these positions, so any argument inserted before
+    model/stage/parent_dir shifts every results.csv column (parent_dir -> out_range,
+    LARGEST_TRUE -> finished flag, SMALLEST_FALSE never written). The expected tail is
+    (model, stage, parent_dir, in_range, out_range, req_min, evaluation, ...).
+    """
+    if len(store_positional) < 7:
+        return False
+    if str(store_positional[1]).strip() not in ('1', '2'):
+        return False
+    parent_dir_arg = str(store_positional[2]).strip()
+    if not parent_dir_arg:
+        return False
+    # LLM mode always names the parent folder '<in_min>-<in_max>_<out_min>-<out_max>';
+    # SaaS mode uses the use-case id, which may contain no underscore.
+    if os.environ.get('SERVICE_TYPE') != 'SaaS' and '_' not in parent_dir_arg:
+        return False
+    return True
+
+
 def _compute_success_rate_from_results():
     """Compute overall success rate (%) directly from results payload."""
     results_path = Path(RESULTS_DIR) / RESULTS_FILENAME
@@ -1199,6 +1221,17 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 smallest_false_str,
                 finished_flag_str,
             ]
+            # Contract self-check for the argv order above: store_results.py infers the layout
+            # from these positions, so a stray argument before model/stage/parent_dir silently
+            # shifts every results.csv column. Warn, never abort the experiment.
+            store_positional = store_args[3:]  # strip sys.executable, -u and the script path
+            if not _store_args_contract_ok(store_positional):
+                print(
+                    "Warning: store_results.py argv contract mismatch — expected "
+                    "(model, stage, parent_dir, in_range, out_range, req_min, evaluation, ...); "
+                    "results.csv columns will be misaligned. Append new arguments at the end, "
+                    "never in the middle."
+                )
             print("Running (args):", " ".join(store_args))
             subprocess.run(store_args)
         finally:

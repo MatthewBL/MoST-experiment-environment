@@ -95,14 +95,23 @@ Indices below are `sys.argv[1:]` inside `requests/store_results.py`, compact for
 | 13 | smallest_false | confirmed smallest FALSE (may be empty) |
 | 14 | finished | `TRUE` / `FALSE` for the last iteration of the token experiment |
 
-`store_results.py` selects this parser with
-`is_compact_cli = len(args) >= 7 and ('_' in args[2] or '/' in args[2] or '\\' in args[2])`, and
-otherwise falls back to the legacy order `model, gpus, cpus, node, stage, parent_dir, in_range,
-out_range, req_min, evaluation, [median, ...]`. Because the detection key is the **third** argument,
-inserting any argument in the middle silently switches parsers and corrupts the run: wrong
-tokens/REQ_MIN/EVALUATION columns, iteration folders nested under the wrong parent, and an
-`Experiment_*` archive folder that ends up empty because `_archive_execution_results()` cannot find
-`results/<parent_dir>`.
+`store_results.py` selects this parser with a positive signature (`_compact_layout_signature`: second
+argument is the stage `1`/`2`, third is a non-empty `parent_dir`, fourth/fifth are token intervals —
+relaxed when `SERVICE_TYPE=SaaS`, where those slots carry the use-case id — and seventh is
+`TRUE`/`FALSE`), and otherwise falls back to the legacy order `model, gpus, cpus, node, stage,
+parent_dir, in_range, out_range, req_min, evaluation, [median, ...]`. The old `'_' in args[2]`
+heuristic is gone: it silently switched parsers whenever a leading argument was added, and inserting
+any argument in the middle still corrupts the run (wrong tokens/REQ_MIN/EVALUATION columns, iteration
+folders nested under the wrong parent, and an `Experiment_*` archive folder that ends up empty
+because `_archive_execution_results()` cannot find `results/<parent_dir>`).
+
+Every invocation prints the layout that was selected (`CLI format: compact ...`, `CLI format:
+legacy ...` or `CLI format: environment/no-args ...`). Because offset 3 of the compact layout is
+indistinguishable from the legacy layout, a compact layout found at offset 1 or 2 is **not** parsed
+as compact; instead it prints `Warning: compact CLI layout detected at argument index N instead of 0;
+every results.csv column is shifted by N position(s)`. `run_experiment_for_tokens` prints a matching
+`Warning: store_results.py argv contract mismatch` before spawning the child, so a misaligned run is
+visible in the Slurm log instead of being silently mis-stored.
 
 Fragilities to respect:
 
@@ -110,10 +119,12 @@ Fragilities to respect:
   in the middle.
 - `store_results.py` parses the legacy order positionally behind `len(args) >= N` guards, so extra
   arguments shift those guards as well.
-- Keep `EXPERIMENT_TYPE` out of argv (see above): it travels through the environment.
-- SaaS mode: `parent_dir` is the use-case id, which may contain no `_`, `/` or `\`, so the compact
-  detection fails and the legacy parser takes over. Do not rely on the heuristic for new modes;
-  prefer explicit named arguments when refactoring.
+- Keep `EXPERIMENT_TYPE` out of argv (see above): it travels through the environment, and
+  `store_results.py` falls back to the repository-root `.env` (then `../.env`) when the variable is
+  missing, so the first `results.csv` column is populated for manual/API invocations too.
+- SaaS mode: `parent_dir` is the use-case id, which may contain no `_`, `/` or `\`. The signature
+  relaxes the token-interval positions when `SERVICE_TYPE=SaaS`, so these runs are parsed as compact
+  again; never rely on heuristics for new modes, and prefer explicit named arguments when refactoring.
 - When refactoring, keep the legacy branch working or delete it deliberately: the MoST API/dashboard
   and older Slurm logs may still produce the legacy order.
 
