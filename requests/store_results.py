@@ -848,7 +848,7 @@ def main():
         # - Legacy:            model, gpus, cpus, node, stage, parent_dir, in_range, out_range, req_min, evaluation, [median]
         args = sys.argv[1:]
         is_compact_cli = len(args) >= 7 and ('_' in str(args[2]) or '/' in str(args[2]) or '\\' in str(args[2]))
-
+        experiment_type = os.environ.get('EXPERIMENT_TYPE', '')
         parent_dir = None
         model = os.environ.get('MODEL', '')
         stage = os.environ.get('STAGE', '')
@@ -934,6 +934,7 @@ def main():
                 finished_flag = args[17]
         else:
             # Environment variables set in-process by experiment_automation.py
+            experiment_type = os.environ.get('EXPERIMENT_TYPE', '')
             min_input_tokens = os.environ.get('MIN_INPUT_TOKENS', '')
             max_input_tokens = os.environ.get('MAX_INPUT_TOKENS', '')
             min_output_tokens = os.environ.get('MIN_OUTPUT_TOKENS', '')
@@ -1075,7 +1076,7 @@ def main():
             writer = csv.writer(file)
             # Write header with requested fields (remove GPUS/CPUS)
             writer.writerow([
-                "MODEL_USED",
+                "EXPERIMENT_TYPE","MODEL_USED",
                 "MIN_INPUT_TOKENS", "MAX_INPUT_TOKENS",
                 "MIN_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS",
                 "REQ_MIN", "EVALUATION",
@@ -1091,6 +1092,7 @@ def main():
             ])
             # Write data row
             writer.writerow([
+                experiment_type,
                 model_used,
                 min_input_tokens,
                 max_input_tokens,

@@ -1171,6 +1171,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             os.makedirs(RESULTS_DIR, exist_ok=True)
             os.chdir(RESULTS_DIR)
             store_results_script = Path(__file__).resolve().parent / 'requests' / 'store_results.py'
+            experiment_type = os.environ.get('EXPERIMENT_TYPE', '')
             evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
             # Confirmed bounds are read after the stage update so that the row
@@ -1182,7 +1183,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
                 sys.executable, "-u", str(store_results_script),
-                str(model), str(stage), str(parent_dir),
+                str(experiment_type), str(model), str(stage), str(parent_dir),
                 str(interval_strs[0]), str(interval_strs[1]), str(req_min_for_store), str(evaluation_flag), str(median_str),
                 str(os.environ.get('MODEL_USED_RESOLVED', '')),
                 str(termination_reason),
