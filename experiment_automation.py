@@ -443,6 +443,23 @@ def _get_iteration_hard_limit():
     return 15
 
 
+def _format_bound_number(value):
+    """Format a confirmed REQ_MIN bound for results.csv.
+
+    Returns '' when the bound is unknown (None), an integer-looking string for
+    integral values, and a trimmed decimal otherwise.
+    """
+    if value is None:
+        return ''
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.6f}".rstrip('0').rstrip('.')
+
+
 def _compute_success_rate_from_results():
     """Compute overall success rate (%) directly from results payload."""
     results_path = Path(RESULTS_DIR) / RESULTS_FILENAME
@@ -877,11 +894,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
     # Bounds tracking for stage 1
     highest_true = None  # Highest req_min that yielded TRUE
     lowest_false = None  # Lowest req_min that yielded FALSE
- 
-    # Global per-experiment extrema requested for results.csv output.
-    largest_true_seen = None
-    smallest_false_seen = None
-    
+
     # Retry counters for stage 1 and stage 2
     retry_count_stage1 = 0
     retry_count_stage2 = 0
@@ -967,6 +980,19 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             print(f"Warning: unable to compute median response tokens: {e}")
             return None, None
 
+    def _confirmed_bounds():
+        """Confirmed (largest TRUE, smallest FALSE) REQ_MIN bounds for the current stage.
+
+        Stage 1 uses the bounds confirmed by update_stage_1 (highest TRUE /
+        lowest FALSE); stage 2 uses the binary-search bounds m (largest TRUE) and
+        M (smallest FALSE). They are read at persistence time, after the stage
+        update, so an MIT iteration whose final verdict was changed by the
+        success-rate or plateau checks is correctly reflected in the persisted row.
+        """
+        if stage == 2:
+            return m, M
+        return highest_true, lowest_false
+
     while iteration < max_iterations:
         iteration += 1
         print(f"\n--- Iteration {iteration}, Stage {stage}, INPUT_TOKENS={interval_strs[0]}, OUTPUT_TOKENS={interval_strs[1]}, REQ_MIN={req_min} ---")
@@ -983,14 +1009,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             reason = str(exc)
             print(f"Controlled stop: terminating experiment early due to fatal pipeline error: {reason}")
             return {"aborted": True, "reason": reason}
-        # Capture the REQ_MIN used for this evaluation before any update logic
+        # Capture the REQ_MIN used for this evaluation before any update logic.
+        # NOTE: for MIT the final verdict is only known after the success-rate and
+        # plateau checks below, so the confirmed bounds are read at persistence
+        # time (see _confirmed_bounds) instead of tracking raw verdicts here.
         req_min_used = req_min
-        if evaluation_result:
-            if largest_true_seen is None or req_min_used > largest_true_seen:
-                largest_true_seen = req_min_used
-        else:
-            if smallest_false_seen is None or req_min_used < smallest_false_seen:
-                smallest_false_seen = req_min_used
         median_resp_tokens, total_completed_requests = _compute_median_response_tokens()
         requests_per_sec = None
         if duration_seconds and total_completed_requests is not None:
@@ -1087,8 +1110,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
                 termination_reason = (
                     f"STOPPED_STAGE2_ITERATION_LIMIT_EXCEEDED(limit={iteration_hard_limit}, iteration={iteration})"
                 )
-                largest_true = m
-                smallest_false = M
+                largest_true, smallest_false = _confirmed_bounds()
                 if largest_true is not None:
                     req_min_for_store = largest_true
                 persist_return_value = largest_true
@@ -1151,8 +1173,11 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             store_results_script = Path(__file__).resolve().parent / 'requests' / 'store_results.py'
             evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
-            largest_true_str = '' if largest_true_seen is None else str(largest_true_seen)
-            smallest_false_str = '' if smallest_false_seen is None else str(smallest_false_seen)
+            # Confirmed bounds are read after the stage update so that the row
+            # reflects the final verdict of this iteration (MIT included).
+            confirmed_largest_true, confirmed_smallest_false = _confirmed_bounds()
+            largest_true_str = _format_bound_number(confirmed_largest_true)
+            smallest_false_str = _format_bound_number(confirmed_smallest_false)
             finished_flag_str = 'TRUE' if stop_after_persist else 'FALSE'
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
