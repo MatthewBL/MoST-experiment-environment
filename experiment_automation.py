@@ -1171,7 +1171,13 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             os.makedirs(RESULTS_DIR, exist_ok=True)
             os.chdir(RESULTS_DIR)
             store_results_script = Path(__file__).resolve().parent / 'requests' / 'store_results.py'
-            experiment_type = os.environ.get('EXPERIMENT_TYPE', '')
+            # store_results.py reads EXPERIMENT_TYPE from its own environment, so export the
+            # resolved value (works when the type comes from .env or from the default). It is
+            # deliberately NOT passed as an argv entry: store_results.py parses the positional
+            # order (model, stage, parent_dir, in_range, out_range, req_min, evaluation, ...)
+            # and detects that format from the third argument, so extra leading arguments
+            # silently switch it to its legacy parser and corrupt results.csv.
+            os.environ['EXPERIMENT_TYPE'] = get_experiment_type()
             evaluation_flag = "TRUE" if evaluation_for_store else "FALSE"
             median_str = f"{median_resp_tokens:.3f}" if isinstance(median_resp_tokens, (int, float)) else (str(median_resp_tokens) if median_resp_tokens is not None else '')
             # Confirmed bounds are read after the stage update so that the row
@@ -1183,7 +1189,7 @@ def run_experiment_for_tokens(tokens, initial_req_min=None):
             # store_results.py derives prompt aggregates from the requests payload.
             store_args = [
                 sys.executable, "-u", str(store_results_script),
-                str(experiment_type), str(model), str(stage), str(parent_dir),
+                str(model), str(stage), str(parent_dir),
                 str(interval_strs[0]), str(interval_strs[1]), str(req_min_for_store), str(evaluation_flag), str(median_str),
                 str(os.environ.get('MODEL_USED_RESOLVED', '')),
                 str(termination_reason),

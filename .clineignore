@@ -1,0 +1,65 @@
+# .clineignore — keep the agent focused on source code, not data or generated artifacts.
+#
+# Notes:
+# - Cline labels .clineignore as "deprecate soon". The same intent is mirrored in
+#   .clinerules/06-git-artifacts-and-docs.md and in .gitignore, so keep all three in sync.
+# - No negation (!) patterns on purpose: support varies between Cline versions.
+# - Nothing under fmperf/, requests/, examples/ or docs/ that is *source* may be ignored here.
+
+# ── Python caches and build outputs ───────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Experiment outputs (data, not source) ─────────────────────────────────────
+# results tree, generated per-iteration CSVs and raw payloads
+results/
+results*/
+**/results/
+**/output.csv
+**/first_half.csv
+**/second_half.csv
+**/prompts.csv
+**/results.json
+**/results_all.json
+examples/*.csv
+examples/*.json
+
+# Slurm / run logs
+logs/
+pod_logs*/
+*.out
+slurm-*.err
+test_logs.log
+
+# ── Large datasets and binary fixtures ────────────────────────────────────────
+oasst_roots_en_max1000_tokens.jsonl
+**/*.jsonl
+*.pkl
+fmperf/data/all_nbins_64.pkl
+fmperf/loadgen/tests/**/*.csv
+
+# ── Legacy / dead code ────────────────────────────────────────────────────────
+# Stale copy of fmperf/loadgen/run.py: nothing imports it and it must not be edited.
+/loadgen
+
+# ── Sibling project (see .gitignore) ──────────────────────────────────────────
+MoST-dashboard-api/
+
+# ── Local runtime config ──────────────────────────────────────────────────────
+# .env is intentionally NOT ignored: it holds no secrets, only experiment knobs
+# (URL, TOKENS_LIST, REQ_MIN_START, EXPERIMENT_TYPE, DURATION) that are usually
+# required to explain a run's behaviour. Uncomment to hide it.
+# .env
